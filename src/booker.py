@@ -8,7 +8,11 @@ from typing import Awaitable, Callable, Optional
 
 from playwright.async_api import Page
 
-from src.config import LOGIN_URL, SELECTORS, SLOT_PRIORITY, require
+from src.config import LOGIN_URL, SELECTORS, SLOT_PRIORITY, SUBMIT_URL, require
+
+
+class BookingFailed(RuntimeError):
+    pass
 
 ARTIFACTS = Path("artifacts")
 DEFAULT_TIMEOUT_MS = 20_000
@@ -110,3 +114,73 @@ async def slot_has_availability(
         end=end.strftime("%H:%M"),
     )
     return await page.locator(selector).count() > 0
+
+
+async def book_slot(
+    page: Page,
+    target_date: date,
+    start: time,
+    end: time,
+    *,
+    dry_run: bool,
+    log: logging.Logger,
+) -> None:
+    """Click an available cell, advance to confirmation, submit, verify.
+
+    Success is detected by URL navigating away from SUBMIT_URL after clicking
+    Submit (the confirmation_marker text is checked too as a sanity signal,
+    but URL change is authoritative). On failure raises BookingFailed.
+    """
+    cell_selector = require(
+        SELECTORS.available_slot_cell, "available_slot_cell"
+    ).format(
+        date=target_date.strftime("%d-%m-%Y"),
+        start=start.strftime("%H:%M"),
+        end=end.strftime("%H:%M"),
+    )
+    log.info("clicking available cell for %s %s-%s", target_date, start, end)
+    await page.locator(cell_selector).first.click()
+    await page.wait_for_timeout(800)  # let cell-selection state settle
+
+    log.info("clicking Next")
+    await page.locator(
+        require(SELECTORS.next_button, "next_button")
+    ).first.click()
+    await page.wait_for_url(f"**{SUBMIT_URL.split('//')[1]}", timeout=DEFAULT_TIMEOUT_MS)
+    await page.wait_for_load_state("networkidle", timeout=DEFAULT_TIMEOUT_MS)
+    ARTIFACTS.mkdir(exist_ok=True)
+    await page.screenshot(path=str(ARTIFACTS / "pre_submit.png"))
+
+    log.info("ticking agreement checkbox")
+    await page.check(require(SELECTORS.agreement_checkbox, "agreement_checkbox"))
+
+    if dry_run:
+        log.info("DRY RUN: stopping before final Submit")
+        return
+
+    log.info("clicking Submit")
+    await page.locator(
+        require(SELECTORS.submit_button, "submit_button")
+    ).first.click()
+    # Success: URL navigates away from make_book_submit.do.
+    try:
+        await page.wait_for_url(
+            lambda url: SUBMIT_URL not in url, timeout=DEFAULT_TIMEOUT_MS
+        )
+    except Exception:
+        # No nav happened — still on the submit page, likely an error banner.
+        await page.screenshot(path=str(ARTIFACTS / "post_submit.png"))
+        body = await page.content()
+        raise BookingFailed(
+            f"still on {SUBMIT_URL} after Submit; page (truncated): {body[:500]!r}"
+        )
+    await page.wait_for_load_state("networkidle", timeout=DEFAULT_TIMEOUT_MS)
+    await page.screenshot(path=str(ARTIFACTS / "post_submit.png"))
+
+    marker = require(SELECTORS.confirmation_marker, "confirmation_marker")
+    if await page.locator(marker).count() == 0:
+        log.warning(
+            "confirmation marker %r not visible, but URL did change — treating "
+            "as success. Inspect post_submit.png to confirm.", marker,
+        )
+    log.info("booking confirmed for %s %s-%s", target_date, start, end)
