@@ -32,9 +32,13 @@ DEFAULT_TIMEOUT_MS = 20_000
 SlotProbe = Callable[[date, time, time], Awaitable[bool]]
 
 
+class LoginFailed(RuntimeError):
+    pass
+
+
 async def login(page: Page, username: str, password: str, log: logging.Logger) -> None:
     log.info("loading login page")
-    await page.goto(LOGIN_URL, wait_until="domcontentloaded")
+    await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=DEFAULT_TIMEOUT_MS)
     # POSS issues a meta-refresh redirect to loginhome.do; wait for the form.
     await page.wait_for_selector(
         require(SELECTORS.login_username, "login_username"),
@@ -45,7 +49,17 @@ async def login(page: Page, username: str, password: str, log: logging.Logger) -
     log.info("submitting login")
     await page.click(require(SELECTORS.login_submit, "login_submit"))
     await page.wait_for_load_state("networkidle", timeout=DEFAULT_TIMEOUT_MS)
-    log.info("login complete")
+    # Verify we're past the login form. If creds are wrong we stay on
+    # loginhome.do with an error banner; surface that distinctly so the GH
+    # email subject line is meaningful.
+    if "loginhome" in page.url or await page.locator(
+        require(SELECTORS.login_username, "login_username")
+    ).count() > 0:
+        raise LoginFailed(
+            f"still on login page after submit (url={page.url!r}); "
+            f"check POLYU_USERNAME / POLYU_PASSWORD secrets"
+        )
+    log.info("login complete (url=%s)", page.url)
 
 
 async def navigate_to_search(
@@ -123,7 +137,6 @@ async def slot_has_availability(
     ).format(
         date=target_date.strftime("%d-%m-%Y"),
         start=start.strftime("%H:%M"),
-        end=end.strftime("%H:%M"),
     )
     return await page.locator(selector).count() > 0
 
@@ -151,6 +164,10 @@ async def book_slot(
         end=end.strftime("%H:%M"),
     )
     log.info("clicking available cell for %s %s-%s", target_date, start, end)
+    # Note: probe -> click is two operations with no DOM snapshot between.
+    # If another user books in the gap, .click() raises a locator timeout
+    # which the caller handles as a normal booking failure. By design — see
+    # spec, "Race-condition optimization out of scope".
     await page.locator(cell_selector).first.click()
     await page.wait_for_timeout(800)  # let cell-selection state settle
 
@@ -239,6 +256,13 @@ async def run(*, dry_run: bool = False, skip_sleep: bool = False) -> int:
             await book_slot(page, target_date, start, end, dry_run=dry_run, log=log)
             return 0
 
+        except LoginFailed as e:
+            log.error("login failed: %s", e)
+            try:
+                await page.screenshot(path=str(ARTIFACTS / "failure.png"))
+            except Exception:
+                pass
+            return 1
         except BookingFailed as e:
             log.error("booking failed: %s", e)
             await page.screenshot(path=str(ARTIFACTS / "failure.png"))

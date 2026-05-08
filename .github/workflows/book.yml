@@ -18,7 +18,10 @@ on:
 jobs:
   book:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Job timeout must absorb: cold runner setup (~3 min) + Chromium install
+    # (~2 min) + sleep until 08:30 HKT (~10 min from 08:20 cron) + booking
+    # flow (~30 s). 30 min gives comfortable margin.
+    timeout-minutes: 30
     env:
       TZ: Asia/Hong_Kong
       POLYU_USERNAME: ${{ secrets.POLYU_USERNAME }}
