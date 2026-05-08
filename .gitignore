@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.python-version-local
+*.egg-info/
+dist/
+build/
+# Playwright artifacts
+test-results/
+playwright-report/
+# Local-only screenshots from discovery
+artifacts/
+*.png
+*.html
+!docs/**/*.png
