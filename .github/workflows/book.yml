@@ -1,0 +1,55 @@
+name: Daily Tennis Booking
+
+on:
+  schedule:
+    # 00:20 UTC = 08:20 HKT. Script then sleeps to 08:30:00.000 HKT.
+    - cron: "20 0 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (don't click final Submit)"
+        type: boolean
+        default: false
+      skip_sleep:
+        description: "Skip the wait until 08:30 HKT (run immediately)"
+        type: boolean
+        default: true
+
+jobs:
+  book:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TZ: Asia/Hong_Kong
+      POLYU_USERNAME: ${{ secrets.POLYU_USERNAME }}
+      POLYU_PASSWORD: ${{ secrets.POLYU_PASSWORD }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install Python and dependencies
+        run: |
+          uv python install 3.12
+          uv sync
+
+      - name: Install Playwright Chromium
+        run: uv run playwright install --with-deps chromium
+
+      - name: Run booker
+        run: |
+          ARGS=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          if [ "${{ github.event.inputs.skip_sleep }}" = "true" ]; then ARGS="$ARGS --skip-sleep"; fi
+          uv run book-tennis $ARGS
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: booking-${{ github.run_id }}
+          path: artifacts/
+          retention-days: 14
+          if-no-files-found: ignore
