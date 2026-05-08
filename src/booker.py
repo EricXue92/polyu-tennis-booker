@@ -1,14 +1,26 @@
 """Main booking orchestration."""
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+import sys
 from datetime import date, time
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
-from playwright.async_api import Page
+from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
-from src.config import LOGIN_URL, SELECTORS, SLOT_PRIORITY, SUBMIT_URL, require
+from src.config import (
+    LOGIN_URL,
+    SELECTORS,
+    SLOT_PRIORITY,
+    SUBMIT_URL,
+    TRIGGER_TIME_HKT,
+    require,
+)
+from src.dates import compute_target_date, sleep_until_hkt
+from src.log import build_logger
 
 
 class BookingFailed(RuntimeError):
@@ -184,3 +196,79 @@ async def book_slot(
             "as success. Inspect post_submit.png to confirm.", marker,
         )
     log.info("booking confirmed for %s %s-%s", target_date, start, end)
+
+
+async def run(*, dry_run: bool = False, skip_sleep: bool = False) -> int:
+    """Returns 0 on successful booking, 1 on no-slot-available or any failure."""
+    username = os.environ["POLYU_USERNAME"]
+    password = os.environ["POLYU_PASSWORD"]
+    log = build_logger("booker", secret=password)
+
+    target_date = compute_target_date()
+    log.info("target booking date: %s", target_date)
+
+    if not skip_sleep:
+        log.info("sleeping until HKT %s", TRIGGER_TIME_HKT)
+        sleep_until_hkt(TRIGGER_TIME_HKT)
+        log.info("woke up, starting booking flow")
+
+    ARTIFACTS.mkdir(exist_ok=True)
+
+    async with async_playwright() as p:
+        browser: Browser = await p.chromium.launch(headless=True)
+        context: BrowserContext = await browser.new_context()
+        page: Page = await context.new_page()
+        page.set_default_timeout(DEFAULT_TIMEOUT_MS)
+
+        try:
+            await login(page, username, password, log)
+            await navigate_to_search(page, target_date, log)
+            await page.screenshot(path=str(ARTIFACTS / "search_results.png"))
+
+            async def probe(d: date, s: time, e: time) -> bool:
+                return await slot_has_availability(page, d, s, e)
+
+            picked = await pick_slot(target_date, probe)
+            if picked is None:
+                log.error(
+                    "no slot available for %s in any priority window", target_date
+                )
+                return 1
+
+            start, end = picked
+            await book_slot(page, target_date, start, end, dry_run=dry_run, log=log)
+            return 0
+
+        except BookingFailed as e:
+            log.error("booking failed: %s", e)
+            await page.screenshot(path=str(ARTIFACTS / "failure.png"))
+            return 1
+        except Exception as e:
+            log.exception("unexpected error: %s", e)
+            try:
+                await page.screenshot(path=str(ARTIFACTS / "failure.png"))
+            except Exception:
+                pass
+            return 1
+        finally:
+            await context.close()
+            await browser.close()
+
+
+def main() -> None:
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="walk the flow but don't click final Submit",
+    )
+    parser.add_argument(
+        "--skip-sleep", action="store_true",
+        help="don't wait until HKT 08:30; run immediately",
+    )
+    args = parser.parse_args()
+    sys.exit(asyncio.run(run(dry_run=args.dry_run, skip_sleep=args.skip_sleep)))
+
+
+if __name__ == "__main__":
+    main()
