@@ -24,6 +24,7 @@ SLOT_PRIORITY: tuple[tuple[time, time], ...] = (
     (time(19, 30), time(20, 30)),
     (time(18, 30), time(19, 30)),
     (time(20, 30), time(21, 30)),
+    (time(17, 30), time(18, 30))
 )
 
 TRIGGER_TIME_HKT = time(8, 30, 0)
