@@ -2,8 +2,13 @@ name: Daily Tennis Booking
 
 on:
   schedule:
-    # 00:20 UTC = 08:20 HKT. Script then sleeps to 08:30:00.000 HKT.
-    - cron: "20 0 * * *"
+    # GitHub Actions cron is unreliable — first-day misses are common, and
+    # individual fires can be delayed by 5–30 min. Three early starts hedge
+    # the bet: any one firing on time gives the booker a chance to be ready
+    # by the 08:30 HKT slot-open. All three sleep to 08:30:00.000 in-process.
+    - cron: "15 0 * * *"   # 08:15 HKT (15 min runway)
+    - cron: "20 0 * * *"   # 08:20 HKT (10 min runway)
+    - cron: "25 0 * * *"   # 08:25 HKT (5 min runway)
   workflow_dispatch:
     inputs:
       dry_run:
