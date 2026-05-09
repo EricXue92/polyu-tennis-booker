@@ -1,10 +1,11 @@
-# TennisBooking
+# polyu-tennis-booker
 
 Auto-books a PolyU tennis court 7 days ahead, daily at 08:30 HKT.
 
 ## What it does
 
-- Runs as a GitHub Actions cron job every day at 08:20 HKT.
+- Runs as a GitHub Actions cron job every day at 08:15 / 08:20 / 08:25 HKT
+  (three hedged starts — GitHub's cron can be delayed 5–30 min).
 - Sleeps in-process until 08:30:00.000 HKT, then logs in and tries to book.
 - Slot priority: 19:30–20:30, then 18:30–19:30, then 20:30–21:30.
 - Books one slot per run; any court. No success notification.
@@ -33,7 +34,7 @@ POLYU_USERNAME='...' POLYU_PASSWORD='...' \
 1. **Push to a private GitHub repo.**
 
    ```bash
-   gh repo create TennisBooking --private --source=. --remote=origin --push
+   gh repo create polyu-tennis-booker --private --source=. --remote=origin --push
    ```
 
 2. **Add Secrets** (Settings → Secrets and variables → Actions, or via gh):
@@ -64,8 +65,8 @@ POLYU_USERNAME='...' POLYU_PASSWORD='...' \
    ```
 
 6. **Let it run on schedule.** From day 2 onwards, the workflow fires
-   automatically at 08:20 HKT (UTC 00:20), then sleeps until 08:30:00.000
-   before issuing the first booking request.
+   automatically at 08:15 / 08:20 / 08:25 HKT (UTC 00:15 / 00:20 / 00:25),
+   each job sleeping until 08:30:00.000 before issuing the booking request.
 
 ## Updating selectors when the PolyU UI changes
 
