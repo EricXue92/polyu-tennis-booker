@@ -18,6 +18,14 @@ uv run pytest tests/test_slot_finder.py::test_picks_first_priority_when_all_avai
 uv run book-tennis --dry-run --skip-sleep # local end-to-end (needs POLYU_USERNAME/POLYU_PASSWORD)
 ```
 
+Manual workflow trigger (use after watchdog issue, or to test on a branch):
+
+```bash
+gh workflow run "Daily Tennis Booking" -f dry_run=false -f skip_sleep=true
+gh workflow run "Daily Tennis Booking" --ref <branch> -f ...   # CF Worker only triggers main; use --ref for branch tests
+gh run watch <id> --interval 15 --exit-status                  # block until done
+```
+
 `--dry-run` walks the full flow but stops before clicking final Submit (so it
 doesn't actually book a court). `--skip-sleep` runs immediately instead of
 waiting until 08:30 HKT.
@@ -46,6 +54,13 @@ Things that aren't obvious from a single file:
   opens a GitHub issue if no successful run exists for the day (the issue
   auto-emails the repo owner). The workflow itself has no `schedule:`
   block — `workflow_dispatch` only.
+
+- **`skip_sleep` default MUST stay `false` in book.yml.** CF Worker calls
+  `workflow_dispatch` with no inputs, so defaults apply. If `skip_sleep`
+  defaults to `true`, the booker runs at 08:23 (after runner cold-start)
+  before PolyU's 08:30 slot-open, and bookings will silently fail. The CF
+  Worker also hardcodes `ref: "main"` — testing on a branch requires
+  explicit `gh workflow run --ref <branch>`.
 
 - **Exit codes drive notification.** Exit 0 = booked successfully (silent).
   Exit 1 = no slot in any priority window, or any error (login failure,
