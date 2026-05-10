@@ -64,7 +64,7 @@ async function triggerWorkflow(env: Env): Promise<void> {
 }
 
 interface WorkflowRun {
-  name: string;
+  path: string;
   created_at: string;
   conclusion: string | null;  // null while in progress
   status: string;
@@ -83,9 +83,11 @@ async function checkAndAlert(env: Env): Promise<void> {
     await openIssue(env, today, "(could not fetch run list to confirm)");
     return;
   }
-  const data = (await resp.json()) as { workflow_runs: WorkflowRun[] };
-  const todaysRuns = data.workflow_runs.filter(
-    (r) => r.name === "Daily Tennis Booking" && isRunFromTodayHKT(r.created_at, today),
+  const data = (await resp.json()) as { workflow_runs?: WorkflowRun[] };
+  const runs = data.workflow_runs ?? [];
+  const expectedPath = ".github/workflows/" + env.WORKFLOW_FILE;
+  const todaysRuns = runs.filter(
+    (r) => r.path === expectedPath && isRunFromTodayHKT(r.created_at, today),
   );
   const success = todaysRuns.find((r) => r.conclusion === "success");
   if (success) {
