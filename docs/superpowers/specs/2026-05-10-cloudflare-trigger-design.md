@@ -139,7 +139,9 @@ Fine-grained token, scoped to this repo only:
   - `Issues: Read and write` (create issue on miss)
   - `Metadata: Read-only` (mandatory)
   - `Contents: Read-only` (workflow_dispatch needs ref resolution)
-- Expiration: 1 year. Renewal procedure documented in worker README.
+- Expiration: never (user choice — favor zero-maintenance over yearly rotation;
+  scope is narrow enough that compromise impact is bounded to this one repo's
+  Actions/Issues).
 
 Stored as Cloudflare Worker secret `GITHUB_PAT` (`wrangler secret put`).
 
