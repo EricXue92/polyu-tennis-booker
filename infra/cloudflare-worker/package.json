@@ -1,0 +1,16 @@
+{
+  "name": "polyu-tennis-trigger",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker that triggers polyu-tennis-booker workflow_dispatch on time",
+  "scripts": {
+    "dev": "wrangler dev --test-scheduled",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250101.0",
+    "typescript": "^5.4.0",
+    "wrangler": "^3.80.0"
+  }
+}
