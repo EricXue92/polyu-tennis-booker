@@ -55,6 +55,14 @@ Things that aren't obvious from a single file:
   auto-emails the repo owner). The workflow itself has no `schedule:`
   block — `workflow_dispatch` only.
 
+- **PolyU releases 7-days-ahead slots at EXACTLY 08:30 HKT.** Booking before
+  that time sees no available slots; booking late loses popular slots to
+  other users. The whole hedged-trigger architecture (CF fires at 08:20,
+  runner cold-starts, booker sleeps to 08:30:00.000) exists to land on this
+  exact moment with environment pre-warmed. Never propose changes that
+  would let the booker run before 08:30 HKT (e.g., `skip_sleep=true`,
+  removing the `sleep_until_hkt` call, lowering `TRIGGER_TIME_HKT`).
+
 - **`skip_sleep` default MUST stay `false` in book.yml.** CF Worker calls
   `workflow_dispatch` with no inputs, so defaults apply. If `skip_sleep`
   defaults to `true`, the booker runs at 08:23 (after runner cold-start)
