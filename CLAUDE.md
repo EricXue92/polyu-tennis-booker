@@ -38,12 +38,14 @@ in priority order from `SLOT_PRIORITY`) → `book_slot`.
 
 Things that aren't obvious from a single file:
 
-- **Three hedged cron starts.** `.github/workflows/book.yml` fires at 08:15,
-  08:20, and 08:25 HKT. Each job sleeps in-process via `sleep_until_hkt` until
-  exactly 08:30:00.000 before issuing the booking. GitHub's cron can be
-  delayed 5–30 min, so multiple starts protect against a single late fire.
-  All three may end up running; only the first to grab a slot succeeds — the
-  others exit 1 with "no slot available", which is fine.
+- **External Cloudflare Worker triggers the workflow.** GitHub Actions'
+  scheduled cron proved unreliable (skipped days, multi-hour delays), so a
+  Cloudflare Worker (`infra/cloudflare-worker/`) calls `workflow_dispatch`
+  API at 08:20 HKT daily. The booker still calls `sleep_until_hkt` to land
+  on 08:30:00.000. A second cron in the same Worker fires at 08:35 HKT and
+  opens a GitHub issue if no successful run exists for the day (the issue
+  auto-emails the repo owner). The workflow itself has no `schedule:`
+  block — `workflow_dispatch` only.
 
 - **Exit codes drive notification.** Exit 0 = booked successfully (silent).
   Exit 1 = no slot in any priority window, or any error (login failure,
