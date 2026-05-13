@@ -5,7 +5,7 @@ import asyncio
 import logging
 import os
 import sys
-from datetime import date, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
@@ -28,6 +28,10 @@ class BookingFailed(RuntimeError):
 
 ARTIFACTS = Path("artifacts")
 DEFAULT_TIMEOUT_MS = 20_000
+# How early (before TRIGGER_TIME_HKT) to start the login+prep work, so we can
+# sit on a fully-loaded search form and only fire Search at 08:30:00.000 sharp.
+# Empirically login + dropdown + date-set takes ~18 seconds; 60s gives slack.
+PRELOGIN_LEAD_SECONDS = 60
 
 SlotProbe = Callable[[date, time, time], Awaitable[bool]]
 
@@ -62,15 +66,15 @@ async def login(page: Page, username: str, password: str, log: logging.Logger) -
     log.info("login complete (url=%s)", page.url)
 
 
-async def navigate_to_search(
+async def prepare_search(
     page: Page,
     target_date: date,
     log: logging.Logger,
 ) -> None:
-    """Open Sports Facility -> Tennis, set date filter, click Search.
+    """Open Sports Facility -> Tennis and set the date filter.
 
-    Search renders results in-place via AJAX, so we wait for the timetable
-    table to appear rather than for full-page navigation.
+    Stops *before* clicking Search so the caller can do the final click at
+    exactly 08:30:00.000 HKT, when PolyU releases the day+7 slots.
     """
     log.info("opening sports facility menu")
     # Menu is href="#"; clicking opens the dropdown but doesn't navigate.
@@ -99,6 +103,9 @@ async def navigate_to_search(
         date_str,
     )
 
+
+async def submit_search(page: Page, log: logging.Logger) -> None:
+    """Click Search and wait for the AJAX timetable to render."""
     log.info("clicking Search")
     await page.locator(
         require(SELECTORS.search_button, "search_button")
@@ -114,13 +121,18 @@ async def pick_slot(
     target_date: date,
     is_available: SlotProbe,
 ) -> Optional[tuple[time, time]]:
-    """Return the first available (start, end) slot in priority order, else None.
+    """Return the highest-priority available (start, end) slot, else None.
 
-    `is_available` probes the live page (or a fake, in tests). Iteration order
-    matches SLOT_PRIORITY exactly so failing slots can be diagnosed by log.
+    All probes fire concurrently via asyncio.gather to minimize the wall-clock
+    gap between Search results landing and the click on a free cell. Result
+    selection still walks SLOT_PRIORITY in order, so priority semantics are
+    preserved.
     """
-    for start, end in SLOT_PRIORITY:
-        if await is_available(target_date, start, end):
+    results = await asyncio.gather(
+        *(is_available(target_date, start, end) for start, end in SLOT_PRIORITY)
+    )
+    for (start, end), available in zip(SLOT_PRIORITY, results):
+        if available:
             return start, end
     return None
 
@@ -224,10 +236,20 @@ async def run(*, dry_run: bool = False, skip_sleep: bool = False) -> int:
     target_date = compute_target_date()
     log.info("target booking date: %s", target_date)
 
+    # Two-phase sleep: wake early to log in and prep the search form, then
+    # sleep the remainder so we only click Search at 08:30:00.000 sharp.
+    # PolyU releases day+7 slots at exactly 08:30 HKT and popular evening
+    # slots are gone within seconds — being pre-logged-in saves ~18s vs
+    # starting login at the trigger time. See CLAUDE.md.
+    prelogin_target = (
+        datetime.combine(date.today(), TRIGGER_TIME_HKT)
+        - timedelta(seconds=PRELOGIN_LEAD_SECONDS)
+    ).time()
+
     if not skip_sleep:
-        log.info("sleeping until HKT %s", TRIGGER_TIME_HKT)
-        sleep_until_hkt(TRIGGER_TIME_HKT)
-        log.info("woke up, starting booking flow")
+        log.info("sleeping until HKT %s (pre-login)", prelogin_target)
+        sleep_until_hkt(prelogin_target)
+        log.info("woke up for pre-login phase")
 
     ARTIFACTS.mkdir(exist_ok=True)
 
@@ -239,7 +261,14 @@ async def run(*, dry_run: bool = False, skip_sleep: bool = False) -> int:
 
         try:
             await login(page, username, password, log)
-            await navigate_to_search(page, target_date, log)
+            await prepare_search(page, target_date, log)
+
+            if not skip_sleep:
+                log.info("prep complete; sleeping until HKT %s", TRIGGER_TIME_HKT)
+                sleep_until_hkt(TRIGGER_TIME_HKT)
+                log.info("woke up at trigger time, firing Search")
+
+            await submit_search(page, log)
             await page.screenshot(path=str(ARTIFACTS / "search_results.png"))
 
             async def probe(d: date, s: time, e: time) -> bool:

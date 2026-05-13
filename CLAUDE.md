@@ -41,8 +41,10 @@ POLYU_USERNAME=... POLYU_PASSWORD=... \
 
 The booking flow is intentionally linear and lives almost entirely in
 `src/booker.py`. Reading it top-to-bottom matches the runtime sequence:
-`login` → `navigate_to_search` → `pick_slot` (probes via `slot_has_availability`
-in priority order from `SLOT_PRIORITY`) → `book_slot`.
+sleep until pre-login → `login` → `prepare_search` (Tennis dropdown +
+date) → sleep until 08:30:00.000 → `submit_search` (Search click) →
+`pick_slot` (probes all slots concurrently via `asyncio.gather`, returns
+highest-priority match in `SLOT_PRIORITY`) → `book_slot`.
 
 Things that aren't obvious from a single file:
 
@@ -62,6 +64,16 @@ Things that aren't obvious from a single file:
   exact moment with environment pre-warmed. Never propose changes that
   would let the booker run before 08:30 HKT (e.g., `skip_sleep=true`,
   removing the `sleep_until_hkt` call, lowering `TRIGGER_TIME_HKT`).
+
+- **Two-phase sleep — login is intentionally BEFORE 08:30.** `run()` sleeps
+  twice: first to `TRIGGER_TIME_HKT - PRELOGIN_LEAD_SECONDS` (08:29:00),
+  then runs `login` + `prepare_search` (Tennis dropdown + date), then
+  sleeps again to 08:30:00.000, then fires `submit_search`. This lets the
+  Search request land within ~1s of the slot-open instant instead of the
+  ~20s it took when login started at 08:30. The "never run before 08:30"
+  rule applies to the *booking action* (Search, probe, click cell, Submit)
+  — logging in earlier is fine and is what makes the 08:30 click hit fast.
+  Do not collapse the two sleeps back into one.
 
 - **`skip_sleep` default MUST stay `false` in book.yml.** CF Worker calls
   `workflow_dispatch` with no inputs, so defaults apply. If `skip_sleep`
