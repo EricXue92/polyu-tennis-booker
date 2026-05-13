@@ -124,7 +124,19 @@ Things that aren't obvious from a single file:
   agreement checkbox, before final Submit), `post_submit.png` (after Submit),
   and `failure.png` on any exception. CI uploads the `artifacts/` directory
   on every run, including failures. `pre_submit.png` is the key thing to
-  inspect after a dry-run smoke test.
+  inspect after a dry-run smoke test. `search_results.png` is captured at
+  the default viewport (~640px) which only covers the morning slot rows —
+  it cannot confirm whether evening `SLOT_PRIORITY` slots were free or
+  taken. Use the log line "no slot available" as the authoritative signal,
+  not the screenshot.
+
+- **Dry-run smoke tests are time-dependent.** `--dry-run --skip-sleep`
+  exercises the full flow up to (but not including) Submit, but only if a
+  priority slot is actually free. After 08:30 HKT, popular slots are gone,
+  `pick_slot` returns None, the flow exits with code 1 BEFORE `book_slot`
+  runs, and no `pre_submit.png` is produced. To validate `book_slot`
+  end-to-end, dry-run before 08:30 HKT or temporarily widen `SLOT_PRIORITY`
+  to include a known-free off-peak window.
 
 - **Tests are offline.** All tests in `tests/` use fakes (e.g. `make_probe`
   in `test_slot_finder.py`) — no network, no Playwright launch. Don't add
