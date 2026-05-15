@@ -14,7 +14,7 @@ morning at 08:30 HKT. Runs as a GitHub Actions cron job (entrypoint
 uv sync                                   # install deps (Python 3.12+, Playwright)
 uv run playwright install chromium        # one-time browser install
 uv run pytest                             # run all unit tests (offline, no network/browser)
-uv run pytest tests/test_slot_finder.py::test_picks_first_priority_when_all_available
+uv run pytest tests/test_slot_finder.py::test_returns_all_when_all_available
 uv run book-tennis --dry-run --skip-sleep # local end-to-end (needs POLYU_USERNAME/POLYU_PASSWORD)
 ```
 
@@ -44,7 +44,8 @@ The booking flow is intentionally linear and lives almost entirely in
 sleep until pre-login → `login` → `prepare_search` (Tennis dropdown +
 date) → sleep until 08:30:00.000 → `submit_search` (Search click) →
 `pick_slot` (probes all slots concurrently via `asyncio.gather`, returns
-highest-priority match in `SLOT_PRIORITY`) → `book_slot`.
+available slots in `SLOT_PRIORITY` order) → `book_slot` (with retry via
+`restart_to_results` on failure — see race-window bullet).
 
 Things that aren't obvious from a single file:
 
@@ -110,10 +111,13 @@ Things that aren't obvious from a single file:
   if so, raises `LoginFailed` distinctly so wrong-credentials show up as a
   meaningful failure, not a downstream selector timeout.
 
-- **Race on probe→click.** `pick_slot` probes availability and `book_slot`
-  re-locates the cell to click it. There's no DOM snapshot in between — if
-  someone else books in the gap, `.click()` times out and we treat it as a
-  normal booking failure. This is by design (per the design spec).
+- **Race window is probe→Submit; failures fall back to next priority.**
+  PolyU only commits the slot on final Submit, so another user can grab
+  it any time during probe → click → Next → checkbox → Submit (~4s
+  window). On `BookingFailed` (incl. "Facility is occupied" banner) or
+  Playwright timeout, `run()` calls `restart_to_results` (goto LOGIN_URL
+  → re-prep → re-Search), re-probes the next candidate from `pick_slot`'s
+  list, and retries. Screenshots are overwritten per attempt.
 
 - **Password redaction.** `src/log.py:build_logger` installs a filter that
   replaces the password string with `***` in log messages and args before any
@@ -133,8 +137,8 @@ Things that aren't obvious from a single file:
 - **Dry-run smoke tests are time-dependent.** `--dry-run --skip-sleep`
   exercises the full flow up to (but not including) Submit, but only if a
   priority slot is actually free. After 08:30 HKT, popular slots are gone,
-  `pick_slot` returns None, the flow exits with code 1 BEFORE `book_slot`
-  runs, and no `pre_submit.png` is produced. To validate `book_slot`
+  `pick_slot` returns an empty list, the flow exits with code 1 BEFORE
+  `book_slot` runs, and no `pre_submit.png` is produced. To validate `book_slot`
   end-to-end, dry-run before 08:30 HKT or temporarily widen `SLOT_PRIORITY`
   to include a known-free off-peak window.
 

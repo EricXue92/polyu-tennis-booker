@@ -13,31 +13,31 @@ def make_probe(available: set[tuple[time, time]]):
 
 
 @pytest.mark.asyncio
-async def test_picks_first_priority_when_all_available():
+async def test_returns_all_when_all_available():
     probe = make_probe(set(SLOT_PRIORITY))
     result = await pick_slot(date(2026, 5, 16), probe)
-    assert result == (time(19, 30), time(20, 30))
+    assert result == list(SLOT_PRIORITY)
 
 
 @pytest.mark.asyncio
-async def test_falls_back_to_second_priority():
+async def test_preserves_priority_order_with_partial_availability():
     probe = make_probe({(time(18, 30), time(19, 30)), (time(20, 30), time(21, 30))})
     result = await pick_slot(date(2026, 5, 16), probe)
-    assert result == (time(18, 30), time(19, 30))
+    assert result == [(time(18, 30), time(19, 30)), (time(20, 30), time(21, 30))]
 
 
 @pytest.mark.asyncio
-async def test_falls_back_to_third_priority():
+async def test_single_availability_returns_singleton_list():
     probe = make_probe({(time(20, 30), time(21, 30))})
     result = await pick_slot(date(2026, 5, 16), probe)
-    assert result == (time(20, 30), time(21, 30))
+    assert result == [(time(20, 30), time(21, 30))]
 
 
 @pytest.mark.asyncio
-async def test_returns_none_when_nothing_available():
+async def test_returns_empty_when_nothing_available():
     probe = make_probe(set())
     result = await pick_slot(date(2026, 5, 16), probe)
-    assert result is None
+    assert result == []
 
 
 @pytest.mark.asyncio

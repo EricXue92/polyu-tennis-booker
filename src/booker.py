@@ -7,9 +7,15 @@ import os
 import sys
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable
 
-from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+from playwright.async_api import (
+    Browser,
+    BrowserContext,
+    Page,
+    TimeoutError as PlaywrightTimeoutError,
+    async_playwright,
+)
 
 from src.config import (
     LOGIN_URL,
@@ -120,21 +126,37 @@ async def submit_search(page: Page, log: logging.Logger) -> None:
 async def pick_slot(
     target_date: date,
     is_available: SlotProbe,
-) -> Optional[tuple[time, time]]:
-    """Return the highest-priority available (start, end) slot, else None.
+) -> list[tuple[time, time]]:
+    """Return available (start, end) slots in SLOT_PRIORITY order.
 
     All probes fire concurrently via asyncio.gather to minimize the wall-clock
-    gap between Search results landing and the click on a free cell. Result
-    selection still walks SLOT_PRIORITY in order, so priority semantics are
-    preserved.
+    gap between Search results landing and the click on a free cell. The
+    caller tries the first slot; if booking fails (e.g. another user committed
+    in the click→Submit window) it can fall back to the next entry.
     """
     results = await asyncio.gather(
         *(is_available(target_date, start, end) for start, end in SLOT_PRIORITY)
     )
-    for (start, end), available in zip(SLOT_PRIORITY, results):
-        if available:
-            return start, end
-    return None
+    return [slot for slot, available in zip(SLOT_PRIORITY, results) if available]
+
+
+async def restart_to_results(
+    page: Page,
+    target_date: date,
+    log: logging.Logger,
+) -> None:
+    """Re-arm the search results page after a failed booking attempt.
+
+    On Submit-occupied or click-timeout failures we're left on the wrong page
+    (make_book_submit.do with an error banner, or a half-loaded confirmation).
+    Navigate back to make_book.do — LOGIN_URL points there and authenticated
+    sessions skip the j_security_check — then re-run the Tennis + date prep
+    and re-fire Search to repopulate the timetable.
+    """
+    log.info("resetting to search results for retry")
+    await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=DEFAULT_TIMEOUT_MS)
+    await prepare_search(page, target_date, log)
+    await submit_search(page, log)
 
 
 async def slot_has_availability(
@@ -274,16 +296,45 @@ async def run(*, dry_run: bool = False, skip_sleep: bool = False) -> int:
             async def probe(d: date, s: time, e: time) -> bool:
                 return await slot_has_availability(page, d, s, e)
 
-            picked = await pick_slot(target_date, probe)
-            if picked is None:
+            candidates = await pick_slot(target_date, probe)
+            if not candidates:
                 log.error(
                     "no slot available for %s in any priority window", target_date
                 )
                 return 1
 
-            start, end = picked
-            await book_slot(page, target_date, start, end, dry_run=dry_run, log=log)
-            return 0
+            # Walk priority order. Between probe (08:30:04ish) and Submit
+            # (08:30:08ish) another user can commit the same slot, leaving us
+            # stuck on make_book_submit.do with a "Facility is occupied"
+            # banner. On any such failure, reset the page and try the next
+            # candidate — re-probing first so we don't click a cell that just
+            # got taken.
+            for attempt, (start, end) in enumerate(candidates):
+                if attempt > 0:
+                    try:
+                        await restart_to_results(page, target_date, log)
+                    except Exception as e:
+                        log.error("failed to reset page for retry: %s", e)
+                        return 1
+                    if not await slot_has_availability(page, target_date, start, end):
+                        log.info(
+                            "slot %s-%s no longer available, skipping", start, end
+                        )
+                        continue
+                try:
+                    await book_slot(
+                        page, target_date, start, end, dry_run=dry_run, log=log
+                    )
+                    return 0
+                except (BookingFailed, PlaywrightTimeoutError) as e:
+                    log.warning(
+                        "booking attempt failed for %s %s-%s: %s",
+                        target_date, start, end, e,
+                    )
+            log.error(
+                "all %d candidate slots failed for %s", len(candidates), target_date
+            )
+            return 1
 
         except LoginFailed as e:
             log.error("login failed: %s", e)
