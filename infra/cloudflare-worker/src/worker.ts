@@ -2,7 +2,8 @@
  * Tennis booking trigger + watchdog.
  *
  * Two cron triggers in wrangler.toml share this scheduled() handler:
- *  - 00:20 UTC (08:20 HKT): dispatch the booking workflow
+ *  - 23:30 UTC (07:30 HKT): dispatch the booking workflow (60 min lead so
+ *    GitHub Actions queue delays are absorbed; booker sleeps until 08:30 HKT)
  *  - 00:35 UTC (08:35 HKT): check today had a successful run, else open issue
  */
 
@@ -19,7 +20,7 @@ const USER_AGENT = "polyu-tennis-trigger";
 export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     const minute = new Date(event.scheduledTime).getUTCMinutes();
-    if (minute === 20) {
+    if (minute === 30) {
       ctx.waitUntil(triggerWorkflow(env));
     } else if (minute === 35) {
       ctx.waitUntil(checkAndAlert(env));

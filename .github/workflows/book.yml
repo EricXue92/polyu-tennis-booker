@@ -10,7 +10,7 @@ on:
       skip_sleep:
         description: "Skip the wait until 08:30 HKT (run immediately)"
         type: boolean
-        # CF Worker triggers without inputs at 08:20 HKT — booker must sleep
+        # CF Worker triggers without inputs at 07:30 HKT — booker must sleep
         # until 08:30 to hit slot-open. Override with -f skip_sleep=true for
         # ad-hoc manual runs past 08:30 (sleep_until_hkt is a no-op then).
         default: false
@@ -18,10 +18,11 @@ on:
 jobs:
   book:
     runs-on: ubuntu-latest
-    # Job timeout must absorb: cold runner setup (~3 min) + Chromium install
-    # (~2 min) + sleep until 08:30 HKT (~10 min from 08:20 cron) + booking
-    # flow (~30 s). 30 min gives comfortable margin.
-    timeout-minutes: 30
+    # Job timeout must absorb: GH Actions runner queue (occasionally 30+ min)
+    # + cold runner setup (~3 min) + Chromium install (~2 min) + sleep until
+    # 08:30 HKT (up to ~60 min from 07:30 cron) + booking flow (~30 s). 90 min
+    # gives margin. Worst observed queue delay: 35 min on 2026-05-16.
+    timeout-minutes: 90
     env:
       TZ: Asia/Hong_Kong
       POLYU_USERNAME: ${{ secrets.POLYU_USERNAME }}

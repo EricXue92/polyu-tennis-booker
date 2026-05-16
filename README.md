@@ -5,8 +5,10 @@ Auto-books a PolyU tennis court 7 days ahead, daily at 08:30 HKT.
 ## What it does
 
 - A Cloudflare Worker (`infra/cloudflare-worker/`) calls GitHub's
-  `workflow_dispatch` API at 08:20 HKT every day. (GitHub's own scheduled
-  cron is too unreliable — multi-hour delays and full-day misses observed.)
+  `workflow_dispatch` API at 07:30 HKT every day. (GitHub's own scheduled
+  cron is too unreliable — multi-hour delays and full-day misses observed.
+  The 60-minute lead also absorbs GitHub Actions runner queue delays,
+  which have been observed up to 35 minutes.)
 - The booker sleeps in-process until 08:30:00.000 HKT, then logs in and
   tries to book a court 7 days ahead.
 - Slot priority: 19:30–20:30, then 18:30–19:30, then 20:30–21:30, then
@@ -84,10 +86,11 @@ POLYU_USERNAME='...' POLYU_PASSWORD='...' \
    ```
 
 7. **Let it run on schedule.** From day 2 onwards, the Cloudflare Worker
-   fires `workflow_dispatch` at 08:20 HKT (UTC 00:20). The runner cold-starts
-   for ~3-5 min, then the booker sleeps until 08:30:00.000 before issuing
-   the booking request. At 08:35 HKT the watchdog checks for a successful
-   run and opens a GitHub issue if none exists.
+   fires `workflow_dispatch` at 07:30 HKT (UTC 23:30). The runner cold-starts
+   (or queues for up to ~30+ min on busy days), then the booker sleeps until
+   08:30:00.000 before issuing the booking request. At 08:35 HKT the
+   watchdog checks for a successful run and opens a GitHub issue if none
+   exists.
 
 ## Updating selectors when the PolyU UI changes
 
@@ -108,7 +111,7 @@ Open `artifacts/*.html`, update `src/config.py:Selectors`, commit, push.
 - **GitHub Actions** free tier: 2000 min/month for private repos. This
   workflow uses ~1-2 min/run = 30-60 min/month. Far under quota.
 - **Cloudflare Workers** free tier: 100,000 requests/day. The Worker fires
-  twice a day (08:20 + 08:35 HKT) — five orders of magnitude under quota.
+  twice a day (07:30 + 08:35 HKT) — five orders of magnitude under quota.
 
 ## File map
 
@@ -123,7 +126,7 @@ scripts/
 └── discover_selectors.py          # interactive selector discovery tool
 infra/cloudflare-worker/
 ├── src/worker.ts                  # scheduled() handler: dispatch + watchdog
-├── wrangler.toml                  # 2 cron triggers (08:20 + 08:35 HKT)
+├── wrangler.toml                  # 2 cron triggers (07:30 + 08:35 HKT)
 └── README.md                      # deployment + PAT rotation runbook
 tests/                             # offline unit tests
 docs/superpowers/
