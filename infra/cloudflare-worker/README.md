@@ -1,7 +1,12 @@
 # polyu-tennis-trigger (Cloudflare Worker)
 
-Triggers the `polyu-tennis-booker` GitHub Actions workflow at 08:20 HKT every day,
+Triggers the `polyu-tennis-booker` GitHub Actions workflow at 07:30 HKT every day,
 and opens a GitHub issue at 08:35 HKT if no successful booking happened for the day.
+
+The 60-minute lead before 08:30 HKT slot-open absorbs GitHub Actions runner
+queue delays (observed up to 35 min). The booker uses an internal wall-clock
+sleep to land its first request at 08:30:00.000 HKT regardless of when it
+started.
 
 GitHub Actions' own scheduled cron is unreliable on low-activity private repos
 (skipped or hours-late firings observed in practice). Cloudflare Workers Cron
@@ -44,16 +49,16 @@ introduced this Worker.)
 ### 4. Verify in the Cloudflare dashboard
 
 Workers & Pages → `polyu-tennis-trigger` → Settings → Triggers.
-Confirm two cron triggers: `20 0 * * *` and `35 0 * * *`.
+Confirm two cron triggers: `30 23 * * *` and `35 0 * * *`.
 
-To verify dispatch end-to-end without waiting for 08:20 HKT:
+To verify dispatch end-to-end without waiting for 07:30 HKT:
 
 ```bash
 npx wrangler tail   # live logs
 ```
 
 Then in the Cloudflare dashboard, open the Worker → Triggers, click the
-three-dot menu next to the `20 0 * * *` cron and select **"Trigger"** (or
+three-dot menu next to the `30 23 * * *` cron and select **"Trigger"** (or
 similar wording). You should see `workflow dispatched` in the tail. Then:
 
 ```bash
@@ -93,7 +98,7 @@ Wrangler uses **real wall-clock UTC time** for the scheduled event, so the
 worker branches on whatever the current UTC minute is. Expected output in the
 wrangler dev terminal:
 
-- If current UTC minute is `20`: `dispatch failed status=401 body=...` (the
+- If current UTC minute is `30`: `dispatch failed status=401 body=...` (the
   fake PAT correctly fails GitHub auth — confirms the dispatch path executed)
 - If current UTC minute is `35`: `runs fetch failed status=401` followed by
   `issue create failed status=401 body=...`
@@ -102,7 +107,7 @@ wrangler dev terminal:
 Seeing the 401 means the code path reached GitHub — the test passes.
 
 To exercise a specific branch on demand, temporarily hardcode the minute in
-`src/worker.ts` (e.g., change `if (minute === 20)` to `if (true)`) and revert
+`src/worker.ts` (e.g., change `if (minute === 30)` to `if (true)`) and revert
 before committing.
 
 ## Architecture

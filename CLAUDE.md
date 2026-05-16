@@ -52,15 +52,17 @@ Things that aren't obvious from a single file:
 - **External Cloudflare Worker triggers the workflow.** GitHub Actions'
   scheduled cron proved unreliable (skipped days, multi-hour delays), so a
   Cloudflare Worker (`infra/cloudflare-worker/`) calls `workflow_dispatch`
-  API at 08:20 HKT daily. The booker still calls `sleep_until_hkt` to land
-  on 08:30:00.000. A second cron in the same Worker fires at 08:35 HKT and
+  API at 07:30 HKT daily. The 60-minute lead absorbs GitHub Actions runner
+  queue delays (observed up to 35 min on 2026-05-16, which made the
+  previous 08:20 cron miss the 08:30 slot-open). The booker still calls
+  `sleep_until_hkt` to land on 08:30:00.000 regardless of when it started. A second cron in the same Worker fires at 08:35 HKT and
   opens a GitHub issue if no successful run exists for the day (the issue
   auto-emails the repo owner). The workflow itself has no `schedule:`
   block — `workflow_dispatch` only.
 
 - **PolyU releases 7-days-ahead slots at EXACTLY 08:30 HKT.** Booking before
   that time sees no available slots; booking late loses popular slots to
-  other users. The whole hedged-trigger architecture (CF fires at 08:20,
+  other users. The whole hedged-trigger architecture (CF fires at 07:30,
   runner cold-starts, booker sleeps to 08:30:00.000) exists to land on this
   exact moment with environment pre-warmed. Never propose changes that
   would let the booker run before 08:30 HKT (e.g., `skip_sleep=true`,

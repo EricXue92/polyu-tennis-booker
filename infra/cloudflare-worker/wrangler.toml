@@ -7,7 +7,9 @@ GITHUB_OWNER = "EricXue92"
 GITHUB_REPO = "polyu-tennis-booker"
 WORKFLOW_FILE = "book.yml"
 
-# 00:20 UTC = 08:20 HKT — primary trigger
+# 23:30 UTC = 07:30 HKT — primary trigger (fires 60 min before slot-open
+# so GitHub Actions runner queue delays of up to ~50 min are absorbed; the
+# booker sleeps on its own clock until 08:29:00 HKT regardless).
 # 00:35 UTC = 08:35 HKT — watchdog
 [triggers]
-crons = ["20 0 * * *", "35 0 * * *"]
+crons = ["30 23 * * *", "35 0 * * *"]
