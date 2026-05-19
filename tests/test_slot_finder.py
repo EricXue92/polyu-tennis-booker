@@ -50,3 +50,17 @@ async def test_iteration_order_matches_config():
 
     await pick_slot(date(2026, 5, 16), probe)
     assert seen == list(SLOT_PRIORITY)
+
+
+@pytest.mark.asyncio
+async def test_tuesday_excludes_staff_reserved_slots():
+    # 2026-05-26 is a Tuesday — 18:30-19:30 and 19:30-20:30 are staff-only.
+    probed: list[tuple[time, time]] = []
+
+    async def probe(d, start, end):
+        probed.append((start, end))
+        return True
+
+    result = await pick_slot(date(2026, 5, 26), probe)
+    assert probed == [(time(20, 30), time(21, 30)), (time(17, 30), time(18, 30))]
+    assert result == [(time(20, 30), time(21, 30)), (time(17, 30), time(18, 30))]

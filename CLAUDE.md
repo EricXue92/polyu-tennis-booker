@@ -121,6 +121,15 @@ Things that aren't obvious from a single file:
   → re-prep → re-Search), re-probes the next candidate from `pick_slot`'s
   list, and retries. Screenshots are overwritten per attempt.
 
+- **Submit detects failure in ~1s, not 20s.** After clicking Submit,
+  `book_slot` races two waiters: `wait_for_url` (success — page navigates
+  away from `make_book_submit.do`) against `wait_for_selector` on the
+  "Facility is occupied" banner (known failure). Without the race, the URL
+  waiter eats the full 20s `DEFAULT_TIMEOUT_MS` before the retry path
+  starts — by which time the next-priority slot is also gone. The known
+  banner phrase is hardcoded; unknown error pages still fall through to
+  the 20s timeout and are captured in `post_submit.png`.
+
 - **Password redaction.** `src/log.py:build_logger` installs a filter that
   replaces the password string with `***` in log messages and args before any
   handler sees them. Playwright errors can quote field values, so all logging
@@ -158,6 +167,20 @@ Things that aren't obvious from a single file:
 - Slot preferences: `SLOT_PRIORITY` in `src/config.py` (tuple of `(start, end)`, tried in order).
 - Trigger time: `TRIGGER_TIME_HKT` in `src/config.py`.
 - Days-ahead window: `DAYS_AHEAD` in `src/dates.py`.
+
+## Weekday-specific exclusions
+
+`config.slot_priority_for(target_date)` filters `SLOT_PRIORITY` per weekday
+before `pick_slot` probes — the booker never queries cells that the PolyU
+policy guarantees will be gray. Currently:
+
+- **Tuesday 18:30-20:30** (both `(18:30, 19:30)` and `(19:30, 20:30)` slots)
+  is permanently reserved for PolyU staff. Excluded so Tuesday-target runs
+  fall straight through to 17:30 and 20:30 candidates instead of wasting
+  the priority list on always-`no-vacancy` cells.
+
+Add new exclusions in `_TUESDAY_STAFF_RESERVED`-style frozensets next to
+the existing one, and extend `slot_priority_for` to apply them.
 
 ## Design docs
 

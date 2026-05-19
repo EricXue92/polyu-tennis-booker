@@ -14,7 +14,7 @@ The booker formats target_date both ways and passes them through
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import time
+from datetime import date, time
 
 LOGIN_URL = "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
 SUBMIT_URL = "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
@@ -26,6 +26,22 @@ SLOT_PRIORITY: tuple[tuple[time, time], ...] = (
     (time(20, 30), time(21, 30)),
     (time(17, 30), time(18, 30))
 )
+
+# Tuesday 18:30-20:30 is reserved for PolyU staff every week, so those cells
+# never become bookable in the search results. Excluding them on Tuesdays
+# stops the booker from wasting candidates on always-unavailable slots and
+# falling back to the slower retry path.
+_TUESDAY_STAFF_RESERVED: frozenset[tuple[time, time]] = frozenset({
+    (time(18, 30), time(19, 30)),
+    (time(19, 30), time(20, 30)),
+})
+
+
+def slot_priority_for(target_date: date) -> tuple[tuple[time, time], ...]:
+    """Return SLOT_PRIORITY with weekday-specific exclusions applied."""
+    if target_date.weekday() == 1:  # Tuesday
+        return tuple(s for s in SLOT_PRIORITY if s not in _TUESDAY_STAFF_RESERVED)
+    return SLOT_PRIORITY
 
 TRIGGER_TIME_HKT = time(8, 30, 0)
 

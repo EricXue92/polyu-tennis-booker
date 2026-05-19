@@ -20,10 +20,10 @@ from playwright.async_api import (
 from src.config import (
     LOGIN_URL,
     SELECTORS,
-    SLOT_PRIORITY,
     SUBMIT_URL,
     TRIGGER_TIME_HKT,
     require,
+    slot_priority_for,
 )
 from src.dates import compute_target_date, sleep_until_hkt
 from src.log import build_logger
@@ -133,11 +133,15 @@ async def pick_slot(
     gap between Search results landing and the click on a free cell. The
     caller tries the first slot; if booking fails (e.g. another user committed
     in the click→Submit window) it can fall back to the next entry.
+
+    The priority list is filtered per-weekday by `slot_priority_for` (e.g.
+    Tuesday 18:30-20:30 is excluded because it's always staff-reserved).
     """
+    priority = slot_priority_for(target_date)
     results = await asyncio.gather(
-        *(is_available(target_date, start, end) for start, end in SLOT_PRIORITY)
+        *(is_available(target_date, start, end) for start, end in priority)
     )
-    return [slot for slot, available in zip(SLOT_PRIORITY, results) if available]
+    return [slot for slot, available in zip(priority, results) if available]
 
 
 async def restart_to_results(
@@ -225,13 +229,43 @@ async def book_slot(
     await page.locator(
         require(SELECTORS.submit_button, "submit_button")
     ).first.click()
-    # Success: URL navigates away from make_book_submit.do.
-    try:
-        await page.wait_for_url(
+    # Race success (URL navigates away from make_book_submit.do) against the
+    # known failure banner ("Facility is occupied ..." — appears within ~1s
+    # when someone else committed the slot during our click→Submit window).
+    # Without this race, wait_for_url eats the full 20s timeout before we
+    # fall through to retry — by which time the next-priority slot is also
+    # gone. Detecting the banner in ~1s gives the retry a real chance.
+    url_task = asyncio.create_task(
+        page.wait_for_url(
             lambda url: SUBMIT_URL not in url, timeout=DEFAULT_TIMEOUT_MS
         )
-    except Exception:
-        # No nav happened — still on the submit page, likely an error banner.
+    )
+    err_task = asyncio.create_task(
+        page.wait_for_selector(
+            "text=/Facility is occupied/i",
+            state="visible",
+            timeout=DEFAULT_TIMEOUT_MS,
+        )
+    )
+    done, pending = await asyncio.wait(
+        {url_task, err_task}, return_when=asyncio.FIRST_COMPLETED
+    )
+    for t in pending:
+        t.cancel()
+    # Swallow CancelledError from the cancelled side.
+    for t in pending:
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    if err_task in done and err_task.exception() is None:
+        await page.screenshot(path=str(ARTIFACTS / "post_submit.png"))
+        raise BookingFailed(
+            f"Facility-occupied banner shown after Submit at {SUBMIT_URL}"
+        )
+    if url_task not in done or url_task.exception() is not None:
+        # Neither nav nor known banner — capture page state and fail.
         await page.screenshot(path=str(ARTIFACTS / "post_submit.png"))
         body = await page.content()
         raise BookingFailed(
