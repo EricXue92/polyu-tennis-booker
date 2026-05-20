@@ -45,5 +45,10 @@ def build_logger(name: str, *, secret: str, session_id: str | None = None) -> lo
     handler.setFormatter(logging.Formatter(fmt))
     handler.addFilter(_RedactFilter(secret))
     logger.addHandler(handler)
-    logger.propagate = True  # let caplog capture in tests
+    # Session loggers (booker.s0, booker.s1, ...) must NOT propagate to the
+    # parent "booker" logger — otherwise records get printed twice, once by
+    # the child's handler (with [sN] prefix) and once by the parent's.
+    # The root-logger path is still reachable in tests via caplog because
+    # pytest's caplog captures from the logger directly, not via propagation.
+    logger.propagate = session_id is None
     return logger

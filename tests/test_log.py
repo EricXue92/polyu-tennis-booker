@@ -50,10 +50,12 @@ def test_logger_without_session_id_unchanged(capsys):
     assert "hello" in captured.err
 
 
-def test_logger_session_id_does_not_break_redaction(caplog):
+def test_logger_session_id_does_not_break_redaction(capsys):
+    # Session loggers don't propagate (to avoid double-printing), so use
+    # capsys on stderr instead of caplog.
     logger = build_logger("test_redact", secret="hunter2", session_id="s0")
-    with caplog.at_level(logging.INFO, logger="test_redact"):
-        logger.info("password=hunter2")
-    record = caplog.records[-1]
-    assert "hunter2" not in record.getMessage()
-    assert "***" in record.getMessage()
+    logger.info("password=hunter2")
+    captured = capsys.readouterr()
+    assert "hunter2" not in captured.err
+    assert "***" in captured.err
+    assert "[s0]" in captured.err
