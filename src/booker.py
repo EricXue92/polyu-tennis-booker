@@ -223,7 +223,7 @@ async def submit_and_resolve(
     *,
     session_id: str | None = None,
     log: logging.Logger,
-):
+) -> "BookingResult":
     """Click Submit, race success-URL against the 'occupied' banner, return result.
 
     Returns parallel_runner.BookingResult. SUCCESS = navigated away from
