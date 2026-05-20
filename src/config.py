@@ -23,8 +23,7 @@ SUBMIT_URL = "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/mak
 SLOT_PRIORITY: tuple[tuple[time, time], ...] = (
     (time(19, 30), time(20, 30)),
     (time(18, 30), time(19, 30)),
-    (time(20, 30), time(21, 30)),
-    (time(17, 30), time(18, 30))
+    (time(17, 30), time(18, 30)),
 )
 
 # Tuesday 18:30-20:30 is reserved for PolyU staff every week, so those cells
