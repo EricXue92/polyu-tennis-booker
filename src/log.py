@@ -34,15 +34,21 @@ class _RedactFilter(logging.Filter):
         return True
 
 
-def build_logger(name: str, *, secret: str) -> logging.Logger:
-    logger = logging.getLogger(name)
+def build_logger(name: str, *, secret: str, session_id: str | None = None) -> logging.Logger:
+    logger = logging.getLogger(name if session_id is None else f"{name}.{session_id}")
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
     handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    )
+    fmt = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    if session_id is not None:
+        fmt = f"%(asctime)s %(levelname)s %(name)s: [{session_id}] %(message)s"
+    handler.setFormatter(logging.Formatter(fmt))
     handler.addFilter(_RedactFilter(secret))
     logger.addHandler(handler)
-    logger.propagate = True  # let caplog capture in tests
+    # Session loggers (booker.s0, booker.s1, ...) must NOT propagate to the
+    # parent "booker" logger — otherwise records get printed twice, once by
+    # the child's handler (with [sN] prefix) and once by the parent's.
+    # The root-logger path is still reachable in tests via caplog because
+    # pytest's caplog captures from the logger directly, not via propagation.
+    logger.propagate = session_id is None
     return logger
