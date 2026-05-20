@@ -198,3 +198,15 @@ Validation plan before promoting to production:
 - **Approach B (HTTP POST fast path)** — if PolyU breaks concurrent sessions or the parallel approach still loses peak slots consistently, revisit. Sub-second Submit would make even sequential retries fast enough.
 - **Multiple PolyU accounts** — would double the win rate but requires user-supplied credentials and is a separate design.
 - **Off-peak slot expansion** — orthogonal change to SLOT_PRIORITY; not blocked by this design.
+
+## Smoke-test result (N=2)
+
+2026-05-20 13:40 HKT, local `--dry-run --skip-sleep` against the real PolyU
+system. Both `[s0]` (19:30) and `[s1]` (17:30) reached `login complete`
+within 1ms of each other, and both fired `clicking Search` within 1ms.
+PolyU tolerates concurrent same-account sessions — Approach A is viable.
+
+Slots were unavailable (today is past 08:30, the target date 2026-05-27
+was already largely booked), so both sessions exited cleanly with
+`aborted: slot ... not in search results`. That's the expected
+`_SlotUnavailable` path and verified the coordinator handles it correctly.
