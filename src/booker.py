@@ -21,7 +21,7 @@ from src.config import (
     require,
     slot_priority_for,
 )
-from src.dates import compute_target_date, sleep_until_hkt
+from src.dates import compute_target_date, seconds_until_hkt_time, sleep_until_hkt
 from src.log import build_logger
 
 
@@ -274,8 +274,9 @@ async def run(*, dry_run: bool = False, skip_sleep: bool = False) -> int:
     ).time()
 
     if not skip_sleep:
-        log.info("sleeping until HKT %s (pre-login)", prelogin_target)
-        sleep_until_hkt(prelogin_target)
+        delay = seconds_until_hkt_time(prelogin_target)
+        log.info("sleeping %.1fs until HKT %s (pre-login)", delay, prelogin_target)
+        await asyncio.sleep(delay)
         log.info("woke up for pre-login phase")
 
     slots = list(slot_priority_for(target_date))

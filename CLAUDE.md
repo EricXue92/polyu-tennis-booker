@@ -159,11 +159,9 @@ Things that aren't obvious from a single file:
 - **Artifacts.** `click_through` saves `pre_submit_<session_id>.png`
   (after ticking the agreement checkbox, before final Submit).
   `submit_and_resolve` saves `post_submit_<session_id>.png` (after Submit
-  or on known failure). `failure_<session_id>.png` is saved on any
-  unhandled exception within a session. CI uploads the `artifacts/`
-  directory on every run, including failures. `pre_submit_s0.png` (the
-  rank-0 session) is the key artifact to inspect after a dry-run smoke
-  test.
+  or on known failure). CI uploads the `artifacts/` directory on every
+  run, including failures. `pre_submit_s0.png` (the rank-0 session) is
+  the key artifact to inspect after a dry-run smoke test.
 
 - **Dry-run smoke tests are time-dependent.** `--dry-run --skip-sleep`
   exercises the full flow up to (but not including) Submit, but only if a

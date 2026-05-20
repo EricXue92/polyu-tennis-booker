@@ -72,13 +72,16 @@ class PolyUSession:
             submit_search, slot_has_availability, click_through,
         )
         from src.config import TRIGGER_TIME_HKT
-        from src.dates import sleep_until_hkt
+        from src.dates import seconds_until_hkt_time
 
         # Sleep here (not in prepare) so every session lands Search at 08:30:00.000.
         # Pre-login is already done by prepare; this is the gate.
+        # Use asyncio.sleep, NOT time.sleep — blocking sleep freezes the event loop
+        # and serializes all N sessions' click_through phases, defeating the design.
         if not self._skip_trigger_sleep:
-            self.log.info("prep complete; sleeping until HKT %s", TRIGGER_TIME_HKT)
-            sleep_until_hkt(TRIGGER_TIME_HKT)
+            delay = seconds_until_hkt_time(TRIGGER_TIME_HKT)
+            self.log.info("prep complete; sleeping %.3fs until HKT %s", delay, TRIGGER_TIME_HKT)
+            await asyncio.sleep(delay)
             self.log.info("woke up at trigger time, firing Search")
 
         await submit_search(self.page, self.log)
@@ -145,15 +148,13 @@ async def run_parallel(sessions: list[SessionPhase]) -> int:
                 if result is BookingResult.SUCCESS:
                     win_event.set()
             except Exception as e:
-                _module_log().warning("session %s aborted: %s", s.session_id, e)
+                s.log.warning("aborted: %s", e)
         finally:
             done_events[s.session_id].set()
             try:
                 await s.close()
             except Exception as e:
-                _module_log().warning(
-                    "session %s close failed: %s", s.session_id, e
-                )
+                s.log.warning("close failed: %s", e)
 
     async def coordinator() -> None:
         # Serve Submit turns strictly in rank order.
@@ -207,10 +208,6 @@ async def run_parallel(sessions: list[SessionPhase]) -> int:
         pass
 
     return 0 if win_event.is_set() else 1
-
-
-def _module_log() -> logging.Logger:
-    return logging.getLogger("parallel_runner")
 
 
 async def book_parallel(

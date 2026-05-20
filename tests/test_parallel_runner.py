@@ -33,6 +33,7 @@ class FakeSession:
     raise_in_prepare: Exception | None = None
     raise_in_click: Exception | None = None
     calls: list[str] = field(default_factory=list)
+    log: logging.Logger = field(default_factory=lambda: logging.getLogger("fake_session"))
 
     async def prepare(self) -> None:
         if self.prepare_delay:
