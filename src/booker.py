@@ -179,6 +179,104 @@ async def slot_has_availability(
     return await page.locator(selector).count() > 0
 
 
+async def click_through(
+    page: Page,
+    target_date: date,
+    start: time,
+    end: time,
+    *,
+    session_id: str | None = None,
+    log: logging.Logger,
+) -> None:
+    """Click an available cell, advance to confirmation, tick the agreement.
+
+    Stops *before* clicking Submit so the caller can serialize that step.
+    Saves pre_submit screenshot (namespaced per session if session_id given).
+    """
+    cell_selector = require(
+        SELECTORS.available_slot_cell, "available_slot_cell"
+    ).format(
+        date=target_date.strftime("%d-%m-%Y"),
+        start=start.strftime("%H:%M"),
+        end=end.strftime("%H:%M"),
+    )
+    log.info("clicking available cell for %s %s-%s", target_date, start, end)
+    await page.locator(cell_selector).first.click()
+    await page.wait_for_timeout(800)  # let cell-selection state settle
+
+    log.info("clicking Next")
+    await page.locator(
+        require(SELECTORS.next_button, "next_button")
+    ).first.click()
+    await page.wait_for_url(f"**{SUBMIT_URL.split('//')[1]}", timeout=DEFAULT_TIMEOUT_MS)
+    await page.wait_for_load_state("networkidle", timeout=DEFAULT_TIMEOUT_MS)
+    ARTIFACTS.mkdir(exist_ok=True)
+    suffix = f"_{session_id}" if session_id else ""
+    await page.screenshot(path=str(ARTIFACTS / f"pre_submit{suffix}.png"))
+
+    log.info("ticking agreement checkbox")
+    await page.check(require(SELECTORS.agreement_checkbox, "agreement_checkbox"))
+
+
+async def submit_and_resolve(
+    page: Page,
+    *,
+    session_id: str | None = None,
+    log: logging.Logger,
+):
+    """Click Submit, race success-URL against the 'occupied' banner, return result.
+
+    Returns parallel_runner.BookingResult. SUCCESS = navigated away from
+    submit URL. OCCUPIED = banner shown. ERROR = unknown page state after
+    the full DEFAULT_TIMEOUT_MS.
+    """
+    # Import locally to avoid a top-level cycle (parallel_runner imports booker).
+    from src.parallel_runner import BookingResult
+
+    log.info("clicking Submit")
+    await page.locator(
+        require(SELECTORS.submit_button, "submit_button")
+    ).first.click()
+
+    url_task = asyncio.create_task(
+        page.wait_for_url(
+            lambda url: SUBMIT_URL not in url, timeout=DEFAULT_TIMEOUT_MS
+        )
+    )
+    err_task = asyncio.create_task(
+        page.wait_for_selector(
+            "text=/Facility is occupied/i",
+            state="visible",
+            timeout=DEFAULT_TIMEOUT_MS,
+        )
+    )
+    done, pending = await asyncio.wait(
+        {url_task, err_task}, return_when=asyncio.FIRST_COMPLETED
+    )
+    for t in pending:
+        t.cancel()
+    for t in pending:
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    suffix = f"_{session_id}" if session_id else ""
+    if err_task in done and err_task.exception() is None:
+        await page.screenshot(path=str(ARTIFACTS / f"post_submit{suffix}.png"))
+        log.warning("Facility-occupied banner shown after Submit")
+        return BookingResult.OCCUPIED
+    if url_task not in done or url_task.exception() is not None:
+        await page.screenshot(path=str(ARTIFACTS / f"post_submit{suffix}.png"))
+        log.error("Submit produced unknown page state (neither nav nor banner)")
+        return BookingResult.ERROR
+
+    await page.wait_for_load_state("networkidle", timeout=DEFAULT_TIMEOUT_MS)
+    await page.screenshot(path=str(ARTIFACTS / f"post_submit{suffix}.png"))
+    log.info("booking confirmed")
+    return BookingResult.SUCCESS
+
+
 async def book_slot(
     page: Page,
     target_date: date,
