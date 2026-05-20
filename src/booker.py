@@ -125,10 +125,13 @@ async def pick_slot(
 ) -> list[tuple[time, time]]:
     """Return available (start, end) slots in SLOT_PRIORITY order.
 
-    All probes fire concurrently via asyncio.gather to minimize the wall-clock
-    gap between Search results landing and the click on a free cell. The
-    caller tries the first slot; if booking fails (e.g. another user committed
-    in the click→Submit window) it can fall back to the next entry.
+    Utility retained primarily for tests. Probes all slots concurrently via
+    asyncio.gather and returns those where `is_available` is True, in
+    priority rank order.
+
+    The parallel orchestrator (`parallel_runner.PolyUSession.click_through`)
+    does its own per-session probing with `slot_has_availability` rather than
+    calling this function — each session probes only its own assigned slot.
 
     The priority list is filtered per-weekday by `slot_priority_for` (e.g.
     Tuesday 18:30-20:30 is excluded because it's always staff-reserved).
