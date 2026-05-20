@@ -158,6 +158,11 @@ async def run_parallel(sessions: list[SessionPhase]) -> int:
             )
             for t in pending:
                 t.cancel()
+            for t in pending:
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
             if win_event.is_set():
                 return
             if done_events[s.session_id].is_set():
@@ -168,11 +173,16 @@ async def run_parallel(sessions: list[SessionPhase]) -> int:
             proceed_events[s.session_id].set()
             done_w2 = asyncio.create_task(done_events[s.session_id].wait())
             win_w2 = asyncio.create_task(win_event.wait())
-            await asyncio.wait(
+            _, pending2 = await asyncio.wait(
                 {done_w2, win_w2}, return_when=asyncio.FIRST_COMPLETED
             )
-            done_w2.cancel()
-            win_w2.cancel()
+            for t in pending2:
+                t.cancel()
+            for t in pending2:
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
 
     coord_task = asyncio.create_task(coordinator())
     session_tasks = [asyncio.create_task(run_session(s)) for s in sessions]
