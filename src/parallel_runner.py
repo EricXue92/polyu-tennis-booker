@@ -60,6 +60,7 @@ class PolyUSession:
     password: str
     log: logging.Logger
     dry_run: bool
+    _skip_trigger_sleep: bool = False
 
     async def prepare(self) -> None:
         from src.booker import login, prepare_search
@@ -67,7 +68,19 @@ class PolyUSession:
         await prepare_search(self.page, self.target_date, self.log)
 
     async def click_through(self) -> None:
-        from src.booker import submit_search, slot_has_availability, click_through
+        from src.booker import (
+            submit_search, slot_has_availability, click_through,
+        )
+        from src.config import TRIGGER_TIME_HKT
+        from src.dates import sleep_until_hkt
+
+        # Sleep here (not in prepare) so every session lands Search at 08:30:00.000.
+        # Pre-login is already done by prepare; this is the gate.
+        if not self._skip_trigger_sleep:
+            self.log.info("prep complete; sleeping until HKT %s", TRIGGER_TIME_HKT)
+            sleep_until_hkt(TRIGGER_TIME_HKT)
+            self.log.info("woke up at trigger time, firing Search")
+
         await submit_search(self.page, self.log)
         start, end = self.slot
         if not await slot_has_availability(self.page, self.target_date, start, end):
@@ -198,3 +211,55 @@ async def run_parallel(sessions: list[SessionPhase]) -> int:
 
 def _module_log() -> logging.Logger:
     return logging.getLogger("parallel_runner")
+
+
+async def book_parallel(
+    *,
+    username: str,
+    password: str,
+    target_date: date,
+    slots: list[tuple[time, time]],
+    dry_run: bool,
+    skip_sleep: bool = False,
+) -> int:
+    """Build N PolyUSession instances and run them via run_parallel.
+
+    Returns the process exit code (0 = booked, 1 = nothing booked).
+    """
+    from playwright.async_api import async_playwright
+
+    from src.log import build_logger
+
+    if not slots:
+        build_logger("booker", secret=password).error(
+            "no slots in priority list for %s", target_date
+        )
+        return 1
+
+    ARTIFACTS.mkdir(exist_ok=True)
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        sessions: list[SessionPhase] = []
+        try:
+            for rank, slot in enumerate(slots):
+                sid = f"s{rank}"
+                ctx = await browser.new_context()
+                page = await ctx.new_page()
+                page.set_default_timeout(20_000)
+                sessions.append(PolyUSession(
+                    session_id=sid,
+                    rank=rank,
+                    slot=slot,
+                    target_date=target_date,
+                    context=ctx,
+                    page=page,
+                    username=username,
+                    password=password,
+                    log=build_logger("booker", secret=password, session_id=sid),
+                    dry_run=dry_run,
+                    _skip_trigger_sleep=skip_sleep,
+                ))
+            return await run_parallel(sessions)
+        finally:
+            await browser.close()
