@@ -33,3 +33,27 @@ def test_logger_writes_to_stderr(capsys):
     logger.info("hello")
     captured = capsys.readouterr()
     assert "hello" in captured.err
+
+
+def test_logger_with_session_id_prefixes_messages(capsys):
+    logger = build_logger("booker", secret="x", session_id="s2")
+    logger.info("hello")
+    captured = capsys.readouterr()
+    assert "[s2] hello" in captured.err
+
+
+def test_logger_without_session_id_unchanged(capsys):
+    logger = build_logger("booker", secret="x")
+    logger.info("hello")
+    captured = capsys.readouterr()
+    assert "[s" not in captured.err
+    assert "hello" in captured.err
+
+
+def test_logger_session_id_does_not_break_redaction(caplog):
+    logger = build_logger("test_redact", secret="hunter2", session_id="s0")
+    with caplog.at_level(logging.INFO, logger="test_redact"):
+        logger.info("password=hunter2")
+    record = caplog.records[-1]
+    assert "hunter2" not in record.getMessage()
+    assert "***" in record.getMessage()
