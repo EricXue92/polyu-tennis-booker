@@ -96,3 +96,95 @@ class PolyUSession:
 
 class _SlotUnavailable(RuntimeError):
     """Raised by PolyUSession.click_through when the assigned slot is gone."""
+
+
+async def run_parallel(sessions: list[SessionPhase]) -> int:
+    """Run sessions in parallel, serialize Submit in rank order. Returns exit code."""
+    if not sessions:
+        return 1
+
+    win_event = asyncio.Event()
+    ready_events = {s.session_id: asyncio.Event() for s in sessions}
+    proceed_events = {s.session_id: asyncio.Event() for s in sessions}
+    done_events = {s.session_id: asyncio.Event() for s in sessions}
+
+    async def run_session(s: SessionPhase) -> None:
+        try:
+            try:
+                await s.prepare()
+                if win_event.is_set():
+                    return
+                await s.click_through()
+                if win_event.is_set():
+                    return
+                ready_events[s.session_id].set()
+                # Wait for coordinator to grant our Submit turn (or for a win).
+                ready_wait = asyncio.create_task(proceed_events[s.session_id].wait())
+                win_wait = asyncio.create_task(win_event.wait())
+                done, pending = await asyncio.wait(
+                    {ready_wait, win_wait}, return_when=asyncio.FIRST_COMPLETED
+                )
+                for t in pending:
+                    t.cancel()
+                if win_event.is_set():
+                    return
+                result = await s.submit()
+                if result is BookingResult.SUCCESS:
+                    win_event.set()
+            except Exception as e:
+                _module_log().warning("session %s aborted: %s", s.session_id, e)
+        finally:
+            done_events[s.session_id].set()
+            try:
+                await s.close()
+            except Exception as e:
+                _module_log().warning(
+                    "session %s close failed: %s", s.session_id, e
+                )
+
+    async def coordinator() -> None:
+        # Serve Submit turns strictly in rank order.
+        ordered = sorted(sessions, key=lambda s: s.rank)
+        for s in ordered:
+            if win_event.is_set():
+                return
+            # Wait for THIS session to be ready, OR for it to finish without
+            # reaching ready (prepare/click_through error), OR for a win.
+            ready_w = asyncio.create_task(ready_events[s.session_id].wait())
+            done_w = asyncio.create_task(done_events[s.session_id].wait())
+            win_w = asyncio.create_task(win_event.wait())
+            done, pending = await asyncio.wait(
+                {ready_w, done_w, win_w}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for t in pending:
+                t.cancel()
+            if win_event.is_set():
+                return
+            if done_events[s.session_id].is_set():
+                # Session aborted before reaching ready — move to next rank.
+                continue
+            # Grant the Submit turn and wait for this session to finish before
+            # serving the next rank.
+            proceed_events[s.session_id].set()
+            done_w2 = asyncio.create_task(done_events[s.session_id].wait())
+            win_w2 = asyncio.create_task(win_event.wait())
+            await asyncio.wait(
+                {done_w2, win_w2}, return_when=asyncio.FIRST_COMPLETED
+            )
+            done_w2.cancel()
+            win_w2.cancel()
+
+    coord_task = asyncio.create_task(coordinator())
+    session_tasks = [asyncio.create_task(run_session(s)) for s in sessions]
+    await asyncio.gather(*session_tasks)
+    coord_task.cancel()
+    try:
+        await coord_task
+    except asyncio.CancelledError:
+        pass
+
+    return 0 if win_event.is_set() else 1
+
+
+def _module_log() -> logging.Logger:
+    return logging.getLogger("parallel_runner")
