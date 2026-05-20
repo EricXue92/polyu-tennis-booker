@@ -9,10 +9,19 @@ Auto-books a PolyU tennis court 7 days ahead, daily at 08:30 HKT.
   cron is too unreliable — multi-hour delays and full-day misses observed.
   The 60-minute lead also absorbs GitHub Actions runner queue delays,
   which have been observed up to 35 minutes.)
-- The booker sleeps in-process until 08:30:00.000 HKT, then logs in and
-  tries to book a court 7 days ahead.
-- Slot priority: 19:30–20:30, then 18:30–19:30, then 20:30–21:30, then
-  17:30–18:30 (configurable in `src/config.py:SLOT_PRIORITY`).
+- The runner logs in early (08:29 HKT), then sleeps in-process until
+  08:30:00.000 HKT — exactly when PolyU releases day+7 slots — and races
+  to book a court.
+- **Parallel sessions.** One Playwright `BrowserContext` per priority slot
+  (currently N=3 on most weekdays, N=1 on Tuesdays after staff filter)
+  all log in concurrently and click their assigned slots in parallel. The
+  final Submit is serialized in priority order by a single-dequeuer
+  coordinator, so if a human beats us to the first choice we still try
+  the next within ~1.3s instead of restarting from scratch (~8s).
+- Slot priority: 19:30–20:30, then 18:30–19:30, then 17:30–18:30
+  (configurable in `src/config.py:SLOT_PRIORITY`).
+- Tuesday 18:30–20:30 is permanently reserved for PolyU staff; those
+  cells are excluded on Tuesdays via `slot_priority_for(target_date)`.
 - Books one slot per run; any court. No success notification.
 - On no-slot-available or any error: workflow exits 1, GitHub emails you.
 - A second cron in the same Worker fires at 08:35 HKT and opens a GitHub
@@ -76,8 +85,10 @@ POLYU_USERNAME='...' POLYU_PASSWORD='...' \
    gh run watch
    ```
 
-   Download the artifact bundle and inspect `pre_submit.png`. It should show
-   the confirmation page with the agreement checkbox ticked, ready to submit.
+   Download the artifact bundle and inspect `pre_submit_s{0,1,2}.png` —
+   one per parallel session. Each should show the confirmation page for
+   that session's assigned slot with the agreement checkbox ticked,
+   ready to submit.
 
 6. **Real run** (clicks Submit — actually books a court):
 
@@ -118,10 +129,13 @@ Open `artifacts/*.html`, update `src/config.py:Selectors`, commit, push.
 ```
 .github/workflows/book.yml         # workflow_dispatch only; CF Worker triggers it
 src/
-├── booker.py                      # async login → search → pick slot → submit
+├── booker.py                      # per-session Playwright primitives (login, search,
+│                                  #   click_through, submit_and_resolve) + CLI entry
+├── parallel_runner.py             # N parallel PolyUSession instances; single-dequeuer
+│                                  #   coordinator serializes Submit in priority order
 ├── config.py                      # URLs, slot priority, live PolyU selectors
-├── dates.py                       # HKT date math + sleep_until_hkt
-└── log.py                         # logger with password redaction
+├── dates.py                       # HKT date math + non-blocking sleep helpers
+└── log.py                         # logger with password redaction + [sN] prefix
 scripts/
 └── discover_selectors.py          # interactive selector discovery tool
 infra/cloudflare-worker/
