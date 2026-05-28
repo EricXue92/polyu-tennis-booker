@@ -60,11 +60,20 @@ class PolyUSession:
     password: str
     log: logging.Logger
     dry_run: bool
+    login_lock: asyncio.Lock
     _skip_trigger_sleep: bool = False
 
     async def prepare(self) -> None:
         from src.booker import login, prepare_search
-        await login(self.page, self.username, self.password, self.log)
+        # Serialize login across sessions: PolyU bounces some sessions to an
+        # accessdenied page when the same account logs in concurrently (the
+        # collision window spans the whole login round-trip, so a small stagger
+        # is not enough — observed two logins 3ms apart both denied while one
+        # 0.5s later survived). The lock guards only login; prepare_search and
+        # everything after stay parallel, and serial logins (~7s each) still
+        # finish well inside the 60s pre-login lead.
+        async with self.login_lock:
+            await login(self.page, self.username, self.password, self.log)
         await prepare_search(self.page, self.target_date, self.log)
 
     async def click_through(self) -> None:
@@ -238,6 +247,7 @@ async def book_parallel(
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         sessions: list[SessionPhase] = []
+        login_lock = asyncio.Lock()
         try:
             for rank, slot in enumerate(slots):
                 sid = f"s{rank}"
@@ -255,6 +265,7 @@ async def book_parallel(
                     password=password,
                     log=build_logger("booker", secret=password, session_id=sid),
                     dry_run=dry_run,
+                    login_lock=login_lock,
                     _skip_trigger_sleep=skip_sleep,
                 ))
             return await run_parallel(sessions)
