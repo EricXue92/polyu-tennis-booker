@@ -21,8 +21,8 @@ SUBMIT_URL = "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/mak
 
 # Try in this order. Stop after first successful booking.
 SLOT_PRIORITY: tuple[tuple[time, time], ...] = (
-    (time(19, 30), time(20, 30)),
     (time(18, 30), time(19, 30)),
+    (time(19, 30), time(20, 30)),
     (time(17, 30), time(18, 30)),
 )
 
