@@ -183,7 +183,7 @@ async def click_through(
     log.info("clicking available cell for %s %s-%s", target_date, start, end)
     await page.locator(cell_selector).first.click()
     # PolyU's cell-click handler is synchronous JS that flips a hidden form
-    # field; 200ms is a conservative margin (validated via dry-run).
+    # field; 200ms is a conservative margin.
     await page.wait_for_timeout(200)
 
     log.info("clicking Next")
