@@ -91,9 +91,9 @@ Things that aren't obvious from a single file:
   parallel. The final Submit click is serialized in priority rank order by
   a single-dequeuer coordinator — the first session to successfully Submit
   sets a shared win event, and the others exit cleanly. This replaces the
-  old sequential `book_slot` retry loop, which lost popular slots in the
-  ~5-second click-through after another user committed during our
-  probe→Submit window.
+  old sequential `book_slot` retry loop, which lost popular slots in a
+  click-through window long enough for another user to commit during our
+  probe→Submit gap.
 
 - **`skip_sleep` default MUST stay `false` in book.yml.** CF Worker calls
   `workflow_dispatch` with no inputs, so defaults apply. If `skip_sleep`
@@ -132,7 +132,7 @@ Things that aren't obvious from a single file:
 
 - **Race window is probe→Submit; failures advance to next rank.**
   PolyU only commits the slot on final Submit, so another user can grab
-  it any time during probe → click → Next → checkbox → Submit (~4s
+  it any time during probe → click → Next → checkbox → Submit (~3s
   window). Each session targets exactly one assigned slot: if
   `slot_has_availability` returns false, the session raises
   `_SlotUnavailable` and exits cleanly — the coordinator skips it and
