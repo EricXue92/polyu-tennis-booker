@@ -182,20 +182,24 @@ async def click_through(
     )
     log.info("clicking available cell for %s %s-%s", target_date, start, end)
     await page.locator(cell_selector).first.click()
-    await page.wait_for_timeout(800)  # let cell-selection state settle
+    # PolyU's cell-click handler is synchronous JS that flips a hidden form
+    # field; 200ms is a conservative margin (validated via dry-run).
+    await page.wait_for_timeout(200)
 
     log.info("clicking Next")
     await page.locator(
         require(SELECTORS.next_button, "next_button")
     ).first.click()
     await page.wait_for_url(f"**{SUBMIT_URL.split('//')[1]}", timeout=DEFAULT_TIMEOUT_MS)
-    await page.wait_for_load_state("networkidle", timeout=DEFAULT_TIMEOUT_MS)
-    ARTIFACTS.mkdir(exist_ok=True)
-    suffix = f"_{session_id}" if session_id else ""
-    await page.screenshot(path=str(ARTIFACTS / f"pre_submit{suffix}.png"))
+    # No explicit load-state wait — page.check() below auto-waits for the
+    # checkbox to be visible, enabled and stable.
 
     log.info("ticking agreement checkbox")
     await page.check(require(SELECTORS.agreement_checkbox, "agreement_checkbox"))
+
+    ARTIFACTS.mkdir(exist_ok=True)
+    suffix = f"_{session_id}" if session_id else ""
+    await page.screenshot(path=str(ARTIFACTS / f"pre_submit{suffix}.png"))
 
 
 async def submit_and_resolve(
