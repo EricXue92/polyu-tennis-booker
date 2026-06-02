@@ -190,16 +190,19 @@ Things that aren't obvious from a single file:
 ## Weekday-specific exclusions
 
 `config.slot_priority_for(target_date)` filters `SLOT_PRIORITY` per weekday
-before sessions are created — the booker never spawns a session for a cell
-that PolyU policy guarantees will be gray. Currently:
+before sessions are created. When it returns an empty tuple, `run()`
+short-circuits with exit 0 (no sleep, no Playwright launch) — the watchdog
+treats the day as accounted for and does not open an issue. Currently:
 
-- **Tuesday 18:30-20:30** (both `(18:30, 19:30)` and `(19:30, 20:30)` slots)
-  is permanently reserved for PolyU staff. Excluded so Tuesday-target runs
-  fall straight through to 17:30 and 20:30 candidates instead of wasting
-  the priority list on always-`no-vacancy` cells.
+- **Tuesday is a rest day.** `target_date.weekday() == 1` is in
+  `_REST_WEEKDAYS`, so Tuesday-target runs skip booking entirely. (The
+  18:30-20:30 cells are staff-reserved anyway, and the remaining slots
+  aren't wanted.)
 
-Add new exclusions in `_TUESDAY_STAFF_RESERVED`-style frozensets next to
-the existing one, and extend `slot_priority_for` to apply them.
+Add new rest weekdays to `_REST_WEEKDAYS`. For partial exclusions (some
+slots skipped but the day still booked), reintroduce a frozenset of
+`(start, end)` tuples and filter `SLOT_PRIORITY` against it in
+`slot_priority_for`.
 
 ## Design docs
 

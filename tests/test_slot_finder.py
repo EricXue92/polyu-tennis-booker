@@ -21,16 +21,16 @@ async def test_returns_all_when_all_available():
 
 @pytest.mark.asyncio
 async def test_preserves_priority_order_with_partial_availability():
-    probe = make_probe({(time(18, 30), time(19, 30)), (time(17, 30), time(18, 30))})
+    probe = make_probe({(time(18, 30), time(19, 30)), (time(19, 30), time(20, 30))})
     result = await pick_slot(date(2026, 5, 16), probe)
-    assert result == [(time(18, 30), time(19, 30)), (time(17, 30), time(18, 30))]
+    assert result == [(time(18, 30), time(19, 30)), (time(19, 30), time(20, 30))]
 
 
 @pytest.mark.asyncio
 async def test_single_availability_returns_singleton_list():
-    probe = make_probe({(time(17, 30), time(18, 30))})
+    probe = make_probe({(time(19, 30), time(20, 30))})
     result = await pick_slot(date(2026, 5, 16), probe)
-    assert result == [(time(17, 30), time(18, 30))]
+    assert result == [(time(19, 30), time(20, 30))]
 
 
 @pytest.mark.asyncio
@@ -53,9 +53,9 @@ async def test_iteration_order_matches_config():
 
 
 @pytest.mark.asyncio
-async def test_tuesday_excludes_staff_reserved_slots():
-    # 2026-05-26 is a Tuesday — 18:30-19:30 and 19:30-20:30 are staff-only.
-    # After exclusion only 17:30 remains.
+async def test_tuesday_is_a_rest_day():
+    # 2026-05-26 is a Tuesday — booker treats it as a rest day and probes
+    # nothing at all.
     probed: list[tuple[time, time]] = []
 
     async def probe(d, start, end):
@@ -63,5 +63,5 @@ async def test_tuesday_excludes_staff_reserved_slots():
         return True
 
     result = await pick_slot(date(2026, 5, 26), probe)
-    assert probed == [(time(17, 30), time(18, 30))]
-    assert result == [(time(17, 30), time(18, 30))]
+    assert probed == []
+    assert result == []

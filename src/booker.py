@@ -272,6 +272,13 @@ async def run(*, dry_run: bool = False, skip_sleep: bool = False) -> int:
     target_date = compute_target_date()
     log.info("target booking date: %s", target_date)
 
+    slots = list(slot_priority_for(target_date))
+    if not slots:
+        # Rest weekday (e.g. Tuesday): nothing to book. Exit 0 so the
+        # watchdog treats the day as accounted for and doesn't open an issue.
+        log.info("no slots configured for %s (rest day); skipping run", target_date)
+        return 0
+
     prelogin_target = (
         datetime.combine(date.today(), TRIGGER_TIME_HKT)
         - timedelta(seconds=PRELOGIN_LEAD_SECONDS)
@@ -283,7 +290,6 @@ async def run(*, dry_run: bool = False, skip_sleep: bool = False) -> int:
         await asyncio.sleep(delay)
         log.info("woke up for pre-login phase")
 
-    slots = list(slot_priority_for(target_date))
     log.info("preparing %d parallel session(s) for slots %s", len(slots), slots)
 
     return await book_parallel(

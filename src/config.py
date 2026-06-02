@@ -23,23 +23,21 @@ SUBMIT_URL = "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/mak
 SLOT_PRIORITY: tuple[tuple[time, time], ...] = (
     (time(18, 30), time(19, 30)),
     (time(19, 30), time(20, 30)),
-    (time(17, 30), time(18, 30)),
 )
 
-# Tuesday 18:30-20:30 is reserved for PolyU staff every week, so those cells
-# never become bookable in the search results. Excluding them on Tuesdays
-# stops the booker from wasting candidates on always-unavailable slots and
-# falling back to the slower retry path.
-_TUESDAY_STAFF_RESERVED: frozenset[tuple[time, time]] = frozenset({
-    (time(18, 30), time(19, 30)),
-    (time(19, 30), time(20, 30)),
-})
+# Tuesdays are a rest day — no court is booked at all. Tuesday 18:30-20:30
+# is staff-reserved anyway, and the remaining priority slots aren't wanted,
+# so the booker short-circuits to a no-op success when target_date is Tuesday.
+_REST_WEEKDAYS: frozenset[int] = frozenset({1})  # Mon=0, Tue=1, ...
 
 
 def slot_priority_for(target_date: date) -> tuple[tuple[time, time], ...]:
-    """Return SLOT_PRIORITY with weekday-specific exclusions applied."""
-    if target_date.weekday() == 1:  # Tuesday
-        return tuple(s for s in SLOT_PRIORITY if s not in _TUESDAY_STAFF_RESERVED)
+    """Return SLOT_PRIORITY with weekday-specific exclusions applied.
+
+    Returns an empty tuple on rest weekdays so the booker can skip the run.
+    """
+    if target_date.weekday() in _REST_WEEKDAYS:
+        return ()
     return SLOT_PRIORITY
 
 TRIGGER_TIME_HKT = time(8, 30, 0)
