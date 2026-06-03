@@ -186,3 +186,111 @@ class PolyUHttpClient:
                         end_dt=end_dt,
                     ))
         return out
+
+    async def try_book(self, slot: AvailableSlot) -> BookingResult:
+        """Attempt to book a specific (facility, time-range) slot.
+
+        Two POSTs:
+          1. make_book.do (form-encoded) — selects the cell + advances.
+             Expect 302 → make_book_submit.do. Any other status ⇒ OCCUPIED.
+          2. make_book_submit.do (multipart) — final commit + agreement.
+             Expect 302 → make_book_result.do (SUCCESS).
+             302 back to make_book_submit.do OR 200 with "occupied" banner ⇒ OCCUPIED.
+             Anything else ⇒ ERROR.
+        """
+        from src.config import (
+            MAKE_BOOK_URL,
+            MAKE_BOOK_SUBMIT_URL,
+            MAKE_BOOK_RESULT_URL,
+            TENNIS_ACTV_ID,
+            TENNIS_DATA_SET_ID,
+        )
+
+        date_str = slot.start_dt.strftime("%d/%m/%Y")
+        dt_fmt = "%d %b %Y %H:%M"  # e.g. "10 Jun 2026 12:30"
+        search_form_str = (
+            f"fbUserId={self.fb_user_id}&bookType=INDV"
+            f"&dataSetId={TENNIS_DATA_SET_ID}&actvId={TENNIS_ACTV_ID}"
+            f"&searchDate={date_str}&ctrId={slot.center_id}&facilityId="
+        )
+
+        cell_form = {
+            "brcdNo": "",
+            "phone": "",
+            "extlPtyDclrId": "",
+            "dataSetId": str(TENNIS_DATA_SET_ID),
+            "actvId": str(TENNIS_ACTV_ID),
+            "onBehalfOfFbUserId": "",
+            "byPassQuota": "false",
+            "byPassChrgSchm": "false",
+            "byPassBookingDaysLimit": "false",
+            "repeatOccurrence": "false",
+            "grpFacilityIds": "",
+            "searchFormString": search_form_str,
+            "boMakeBookFacilities[0].ctrId": str(slot.center_id),
+            "boMakeBookFacilities[0].facilityId": str(slot.facility_id),
+            "boMakeBookFacilities[0].startDateTime": slot.start_dt.strftime(dt_fmt),
+            "boMakeBookFacilities[0].endDateTime": slot.end_dt.strftime(dt_fmt),
+            "CSRFToken": self.csrf_token,
+        }
+
+        try:
+            cell_resp = await self._http.post(MAKE_BOOK_URL, data=cell_form)
+        except httpx.HTTPError:
+            return BookingResult.ERROR
+
+        if cell_resp.status_code != 302 or "make_book_submit" not in cell_resp.headers.get("location", ""):
+            return BookingResult.OCCUPIED
+
+        submit_fields = {
+            "dataSetId": str(TENNIS_DATA_SET_ID),
+            "boBookingType.id": "1",
+            "boBookingType.value": "INDV",
+            "boBookingMode.value": "SPORT",
+            "boBookingMode.id": "1",
+            "userRefNum": "",
+            "fbUserId": self.fb_user_id,
+            "grpFacilityIds": "",
+            "repeatOccurrence": "false",
+            "startDate": "",
+            "startTime": "",
+            "endDate": "",
+            "endTime": "",
+            "dayOfWeeks": "",
+            "functionsAvailable": "false",
+            "brcdNo": "",
+            "phone": "",
+            "onBehalfOfFbUserId": "",
+            "byPassQuota": "false",
+            "byPassChrgSchm": "false",
+            "byPassBookingDaysLimit": "false",
+            "searchFormString": search_form_str,
+            "extlPtyDclrId": "",
+            "boMakeBookFacilities[0].ctrId": str(slot.center_id),
+            "boMakeBookFacilities[0].centerName": slot.center_name,
+            "boMakeBookFacilities[0].facilityId": str(slot.facility_id),
+            "boMakeBookFacilities[0].facilityName": slot.facility_name,
+            "boMakeBookFacilities[0].startDateTime": slot.start_dt.strftime(dt_fmt),
+            "boMakeBookFacilities[0].endDateTime": slot.end_dt.strftime(dt_fmt),
+            "declare": "on",
+        }
+        # httpx multipart encoding: pass `files={}` to force multipart even
+        # for text-only fields. Each value becomes (None, value) — None means
+        # no filename, which httpx renders as a plain text form part.
+        multipart_files = {
+            name: (None, value) for name, value in submit_fields.items()
+        }
+        try:
+            submit_resp = await self._http.post(
+                MAKE_BOOK_SUBMIT_URL,
+                files=multipart_files,
+            )
+        except httpx.HTTPError:
+            return BookingResult.ERROR
+
+        location = submit_resp.headers.get("location", "")
+        if submit_resp.status_code == 302 and "make_book_result" in location:
+            return BookingResult.SUCCESS
+        if submit_resp.status_code in (200, 302) and ("Facility is occupied" in (submit_resp.text or "") or "make_book_submit" in location):
+            return BookingResult.OCCUPIED
+        return BookingResult.ERROR
