@@ -68,8 +68,116 @@ def parse_slot(value: str) -> tuple:
 
 
 async def main_async(args: argparse.Namespace) -> int:
-    # Filled in by Task 5 + Task 6.
-    raise NotImplementedError("Playwright wiring lands in Task 5")
+    from playwright.async_api import async_playwright
+
+    from scripts._trace_redaction import redact_request, redact_response
+    from src.booker import (
+        click_through,
+        login,
+        prepare_search,
+        slot_has_availability,
+        submit_and_resolve,
+        submit_search,
+    )
+    from src.log import build_logger
+
+    username = os.environ["POLYU_USERNAME"]
+    password = os.environ["POLYU_PASSWORD"]
+    log = build_logger("capture", secret=password)
+
+    target_date = date.fromisoformat(args.target_date)
+    start, end = parse_slot(args.slot)
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    trace: list[dict] = []
+    seq = 0
+
+    def on_request(request) -> None:
+        nonlocal seq
+        if "www40.polyu.edu.hk" not in request.url:
+            return
+        seq += 1
+        entry = {
+            "kind": "request",
+            "seq": seq,
+            "ts": datetime.utcnow().isoformat() + "Z",
+            "url": request.url,
+            "method": request.method,
+            "headers": dict(request.headers),
+            "post_data": request.post_data,
+        }
+        trace.append(redact_request(entry, secret=password))
+
+    async def on_response(response) -> None:
+        if "www40.polyu.edu.hk" not in response.url:
+            return
+        ctype = response.headers.get("content-type", "")
+        body: str | None
+        if any(
+            ctype.startswith(p)
+            for p in ("text/", "application/json", "application/x-www-form-urlencoded")
+        ):
+            try:
+                body = await response.text()
+            except Exception as e:
+                body = f"<could not read body: {e}>"
+        else:
+            body = f"<binary {ctype}, {response.headers.get('content-length', '?')} bytes>"
+        entry = {
+            "kind": "response",
+            "seq": seq,
+            "ts": datetime.utcnow().isoformat() + "Z",
+            "url": response.url,
+            "status": response.status,
+            "headers": dict(response.headers),
+            "body": body,
+        }
+        trace.append(redact_response(entry, secret=password))
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=not args.headed)
+        try:
+            context = await browser.new_context()
+            context.on("request", on_request)
+            context.on("response", lambda r: asyncio.create_task(on_response(r)))
+            page = await context.new_page()
+            page.set_default_timeout(20_000)
+
+            await login(page, username, password, log)
+            await prepare_search(page, target_date, log)
+            await submit_search(page, log)
+
+            if not await slot_has_availability(page, target_date, start, end):
+                log.error("slot %s-%s not available on %s — cannot capture",
+                          start, end, target_date)
+                # Still dump the partial trace — Search request/response was captured.
+                _write_trace(trace, output_path, log)
+                return 1
+
+            await click_through(
+                page, target_date, start, end,
+                session_id="capture", log=log,
+            )
+
+            if args.no_submit:
+                log.info("--no-submit set; skipping final Submit")
+            else:
+                result = await submit_and_resolve(
+                    page, session_id="capture", log=log,
+                )
+                log.info("submit_and_resolve returned %s", result)
+        finally:
+            await browser.close()
+
+    _write_trace(trace, output_path, log)
+    return 0
+
+
+def _write_trace(trace: list[dict], path: Path, log) -> None:
+    import json
+    path.write_text(json.dumps(trace, indent=2, ensure_ascii=False))
+    log.info("wrote %d trace entries to %s", len(trace), path)
 
 
 def main() -> None:
