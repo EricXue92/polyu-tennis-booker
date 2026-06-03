@@ -68,6 +68,35 @@ async def login(page: Page, username: str, password: str, log: logging.Logger) -
     log.info("login complete (url=%s)", page.url)
 
 
+async def bootstrap_http_client(page, *, log: logging.Logger):
+    """Extract session state from a post-login make_book.do page into a PolyUHttpClient.
+
+    Caller is responsible for calling `client.aclose()`. Raises HtmlParseError
+    if the page is not the expected post-login HTML (e.g. password-expired
+    redirect, unexpected error page).
+    """
+    from src.http_client import PolyUHttpClient, parse_csrf_token, parse_fb_user_id
+
+    html = await page.content()
+    csrf_token = parse_csrf_token(html)
+    fb_user_id = parse_fb_user_id(html)
+    raw_cookies = await page.context.cookies()
+    cookies = {
+        c["name"]: c["value"]
+        for c in raw_cookies
+        if "polyu.edu.hk" in c.get("domain", "")
+    }
+    log.info(
+        "bootstrap_http_client: %d cookies, fbUserId=%s, csrf=%s...",
+        len(cookies), fb_user_id, csrf_token[:8],
+    )
+    return PolyUHttpClient(
+        cookies=cookies,
+        csrf_token=csrf_token,
+        fb_user_id=fb_user_id,
+    )
+
+
 async def prepare_search(
     page: Page,
     target_date: date,
