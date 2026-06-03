@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head><title>Make Booking</title></head>
+<body>
+<script>
+    $.ajax({
+        type: "POST",
+        dataType: "json",
+        url: "/starspossfbstud/secure/menu_click_fctn.json?CSRFToken=0cd6a396-5498-4d05-a3f8-a6fefaa2f9ea",
+        data: {fctnCode: $(ptr).data('fctncode')}
+    });
+</script>
+<form>
+    <input type="hidden" id="fbUserId" name="fbUserId" value="432567"/>
+    <input type="hidden" id="bookType" name="bookType" value="INDV"/>
+</form>
+</body>
+</html>

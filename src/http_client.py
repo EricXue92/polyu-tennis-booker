@@ -87,12 +87,24 @@ _CHROME_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/147.0.0.0 Safari/537.36"
 )
+# Headers sent on every request. Per-request headers override Accept and
+# add Origin / X-Requested-With / Referer overrides as needed (see search
+# and try_book). All values verified against artifacts/http_trace.json.
 _DEFAULT_HEADERS = {
     "User-Agent": _CHROME_UA,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do",
+    "sec-ch-ua": '"Chromium";v="147", "Not.A/Brand";v="8"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"macOS"',
 }
+
+_REFERER_MAKE_BOOK = (
+    "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+)
+_REFERER_MAKE_BOOK_SUBMIT = (
+    "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+)
+_ORIGIN = "https://www40.polyu.edu.hk"
 
 
 _MONTH_ABBR = ("", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -119,7 +131,7 @@ class PolyUHttpClient:
     def __init__(
         self,
         *,
-        cookies: dict[str, str],
+        cookies,
         csrf_token: str,
         fb_user_id: str,
         timeout: float = 10.0,
@@ -171,6 +183,11 @@ class PolyUHttpClient:
             TIMETABLE_URL,
             params={"CSRFToken": self.csrf_token},
             data=form,
+            headers={
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": _REFERER_MAKE_BOOK,
+            },
         )
         resp.raise_for_status()
         payload = resp.json()
@@ -249,7 +266,16 @@ class PolyUHttpClient:
         }
 
         try:
-            cell_resp = await self._http.post(MAKE_BOOK_URL, data=cell_form)
+            cell_resp = await self._http.post(
+                MAKE_BOOK_URL,
+                data=cell_form,
+                headers={
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Origin": _ORIGIN,
+                    "Referer": _REFERER_MAKE_BOOK,
+                    "Upgrade-Insecure-Requests": "1",
+                },
+            )
         except httpx.HTTPError:
             return BookingResult.ERROR
 
@@ -306,6 +332,12 @@ class PolyUHttpClient:
             submit_resp = await self._http.post(
                 MAKE_BOOK_SUBMIT_URL,
                 files=multipart_files,
+                headers={
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Origin": _ORIGIN,
+                    "Referer": _REFERER_MAKE_BOOK_SUBMIT,
+                    "Upgrade-Insecure-Requests": "1",
+                },
             )
         except httpx.HTTPError:
             return BookingResult.ERROR

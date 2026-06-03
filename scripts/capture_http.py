@@ -1,22 +1,22 @@
-"""Capture PolyU HTTP requests during a booking flow.
+"""Capture PolyU HTTP requests during login and make_book.do navigation.
 
-Runs the existing Playwright booker phases (login → prepare_search →
-submit_search → click_through → optional submit_and_resolve) while
-attaching network hooks to record every request and response to
-`artifacts/http_trace.json`. The trace is the source of truth for the
-Phase 2 PolyUHttpClient implementation.
+Logs in via Playwright and navigates to make_book.do with network hooks
+attached, dumping every request/response to `artifacts/http_trace.json`.
+Used to re-discover the post-login CSRFToken/fbUserId shape if PolyU
+updates its HTML — the full booking-flow HTTP shapes (timetable.json,
+make_book.do POST, make_book_submit.do POST) are already baked into
+`src/http_client.py` from the original Phase 1 capture.
 
 Usage:
     POLYU_USERNAME=... POLYU_PASSWORD=... \\
         uv run python scripts/capture_http.py \\
-            --slot 12:30-13:30 \\
             --headed
 
-Add --no-submit to stop before the final Submit click (recording every
-request up to the agreement checkbox tick but not the final POST). To
-capture the Submit + success response, omit --no-submit and pick a
-genuinely free off-peak slot (you will actually book it; cancel after
-via PolyU's UI).
+NOTE (Phase 2b): The --slot flag is retained for argparse backwards
+compatibility but is unused. If you need to re-capture the full booking
+flow (e.g. PolyU changed the make_book.do POST shape), do it manually
+via Chrome DevTools → Network → Save All As HAR rather than extending
+this script.
 """
 from __future__ import annotations
 
@@ -36,9 +36,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--slot",
-        required=True,
-        help="Slot to target, format HH:MM-HH:MM (e.g. 12:30-13:30). "
-        "Must actually be free at run time.",
+        default=None,
+        help="(Deprecated as of Phase 2b — unused, retained for argparse compatibility.)",
     )
     parser.add_argument(
         "--no-submit",
@@ -71,14 +70,8 @@ async def main_async(args: argparse.Namespace) -> int:
     from playwright.async_api import async_playwright
 
     from scripts._trace_redaction import redact_request, redact_response
-    from src.booker import (
-        click_through,
-        login,
-        prepare_search,
-        slot_has_availability,
-        submit_and_resolve,
-        submit_search,
-    )
+    from src.booker import login
+    from src.config import MAKE_BOOK_URL
     from src.log import build_logger
 
     username = os.environ["POLYU_USERNAME"]
@@ -86,7 +79,8 @@ async def main_async(args: argparse.Namespace) -> int:
     log = build_logger("capture", secret=password)
 
     target_date = date.fromisoformat(args.target_date)
-    start, end = parse_slot(args.slot)
+    if args.slot:
+        _start, _end = parse_slot(args.slot)
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -147,28 +141,18 @@ async def main_async(args: argparse.Namespace) -> int:
             page.set_default_timeout(20_000)
 
             await login(page, username, password, log)
-            await prepare_search(page, target_date, log)
-            await submit_search(page, log)
-
-            if not await slot_has_availability(page, target_date, start, end):
-                log.error("slot %s-%s not available on %s — cannot capture",
-                          start, end, target_date)
-                # Still dump the partial trace — Search request/response was captured.
-                _write_trace(trace, output_path, log)
-                return 1
-
-            await click_through(
-                page, target_date, start, end,
-                session_id="capture", log=log,
-            )
-
+            # Navigate to make_book.do so the trace captures its HTML (which
+            # contains CSRFToken + fbUserId for any future HTTP re-discovery).
+            log.info("navigating to make_book.do to capture its HTML")
+            await page.goto(MAKE_BOOK_URL, wait_until="domcontentloaded", timeout=20_000)
             if args.no_submit:
-                log.info("--no-submit set; skipping final Submit")
+                log.info("--no-submit set; nothing further to capture")
             else:
-                result = await submit_and_resolve(
-                    page, session_id="capture", log=log,
+                log.warning(
+                    "Phase 2b: capture_http no longer drives the full booking flow. "
+                    "If you need a fresh booking trace (e.g. PolyU shape changed), capture "
+                    "manually via Chrome DevTools → Network → Save All As HAR."
                 )
-                log.info("submit_and_resolve returned %s", result)
         finally:
             await browser.close()
 

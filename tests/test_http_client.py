@@ -93,19 +93,22 @@ async def test_client_constructs_with_required_session_state():
 
 
 @pytest.mark.asyncio
-async def test_client_sets_chrome_user_agent_and_polyu_referer():
+async def test_client_sets_chrome_user_agent_and_sec_ch_ua():
     # Defensive: mimic the captured Playwright Chromium headers so PolyU
-    # doesn't 4xx us for "non-browser" requests. The exact UA string from
-    # the trace; if PolyU updates their detection, this is the knob.
+    # doesn't 4xx us for "non-browser" requests. Per-request Referer /
+    # Accept / Origin / X-Requested-With are set inside search() and
+    # try_book(); only the truly common headers live on the client.
     from src.http_client import PolyUHttpClient
     client = PolyUHttpClient(
         cookies={"JSESSIONID": "abc"},
         csrf_token="tok-1",
         fb_user_id="432567",
     )
-    headers = client._http.headers  # httpx.AsyncClient.headers
+    headers = client._http.headers
     assert "Chrome" in headers["user-agent"]
-    assert "polyu.edu.hk" in headers.get("referer", "polyu.edu.hk")
+    assert "Chromium" in headers.get("sec-ch-ua", "")
+    assert headers.get("sec-ch-ua-mobile") == "?0"
+    assert headers.get("sec-ch-ua-platform") == '"macOS"'
     await client.aclose()
 
 
@@ -403,3 +406,67 @@ def test_fmt_polyu_dt_is_locale_independent():
             locale.setlocale(locale.LC_TIME, original)
         except locale.Error:
             pass
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_sends_ajax_headers():
+    """The 403-Forbidden post-mortem: Spring rejects timetable.json without
+    X-Requested-With: XMLHttpRequest. Lock this in."""
+    from src.http_client import PolyUHttpClient
+
+    captured = {}
+    def record(request):
+        captured["headers"] = dict(request.headers)
+        return Response(200, text=_load_timetable_fixture())
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/timetable.json"
+    ).mock(side_effect=record)
+
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        await client.search(date(2026, 6, 10))
+    finally:
+        await client.aclose()
+
+    assert captured["headers"].get("x-requested-with") == "XMLHttpRequest"
+    assert "application/json" in captured["headers"].get("accept", "")
+    assert "make_book.do" in captured["headers"].get("referer", "")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_try_book_sends_origin_and_correct_referers():
+    """The 403-Forbidden post-mortem: cell-click and Submit need Origin +
+    Upgrade-Insecure-Requests; final Submit has a DIFFERENT Referer
+    (make_book_submit.do, not make_book.do)."""
+    from src.http_client import PolyUHttpClient
+
+    captured = {}
+    def record_cell(request):
+        captured["cell_headers"] = dict(request.headers)
+        return Response(302, headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"})
+    def record_submit(request):
+        captured["submit_headers"] = dict(request.headers)
+        return Response(302, headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_result.do"})
+
+    respx.post("https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do").mock(side_effect=record_cell)
+    respx.post("https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do").mock(side_effect=record_submit)
+
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        await client.try_book(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+
+    # Cell-click: Origin + make_book.do referer + UIR.
+    assert captured["cell_headers"].get("origin") == "https://www40.polyu.edu.hk"
+    assert "make_book.do" in captured["cell_headers"].get("referer", "")
+    assert "make_book_submit" not in captured["cell_headers"].get("referer", "")
+    assert captured["cell_headers"].get("upgrade-insecure-requests") == "1"
+
+    # Final Submit: Origin + make_book_submit.do referer + UIR.
+    assert captured["submit_headers"].get("origin") == "https://www40.polyu.edu.hk"
+    assert "make_book_submit.do" in captured["submit_headers"].get("referer", "")
+    assert captured["submit_headers"].get("upgrade-insecure-requests") == "1"
