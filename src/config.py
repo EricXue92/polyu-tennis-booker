@@ -19,6 +19,26 @@ from datetime import date, time
 LOGIN_URL = "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
 SUBMIT_URL = "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
 
+# --- Tennis activity HTTP-API constants (derived from artifacts/http_trace.json) ---
+# These are the form-field values PolyU's booking POSTs require for the Tennis
+# activity. They are stable across runs — captured from a real booking and
+# unchanged for the lifetime of PolyU's current booking system. Re-confirm by
+# running scripts/capture_http.py if a booking starts failing with 4xx/5xx.
+
+TIMETABLE_URL = "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/timetable.json"
+MAKE_BOOK_URL = "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+MAKE_BOOK_SUBMIT_URL = "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+MAKE_BOOK_RESULT_URL = "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_result.do"
+
+TENNIS_DATA_SET_ID = 18
+TENNIS_ACTV_ID = 10
+TENNIS_CTR_ID = 1
+TENNIS_CENTER_NAME = "Shaw Sports Complex"
+TENNIS_FACILITIES = {
+    10: "Tennis Court No. 1",
+    11: "Tennis Court No. 2",
+}
+
 # Try in this order. Stop after first successful booking.
 SLOT_PRIORITY: tuple[tuple[time, time], ...] = (
     (time(18, 30), time(19, 30)),
