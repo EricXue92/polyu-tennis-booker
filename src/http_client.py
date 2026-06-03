@@ -77,3 +77,48 @@ def parse_fb_user_id(html: str) -> str:
     raise HtmlParseError(
         "fbUserId hidden input not found in HTML — page shape may have changed"
     )
+
+
+import httpx
+
+
+_CHROME_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/147.0.0.0 Safari/537.36"
+)
+_DEFAULT_HEADERS = {
+    "User-Agent": _CHROME_UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do",
+}
+
+
+class PolyUHttpClient:
+    """Async HTTP client for PolyU booking endpoints.
+
+    Wraps httpx.AsyncClient with session cookies, CSRFToken, fbUserId
+    bootstrapped from a Playwright login. Caller is responsible for
+    aclose().
+    """
+
+    def __init__(
+        self,
+        *,
+        cookies: dict[str, str],
+        csrf_token: str,
+        fb_user_id: str,
+        timeout: float = 10.0,
+    ) -> None:
+        self.csrf_token = csrf_token
+        self.fb_user_id = fb_user_id
+        self._http = httpx.AsyncClient(
+            cookies=cookies,
+            headers=_DEFAULT_HEADERS,
+            timeout=timeout,
+            follow_redirects=False,  # We need to inspect 302 Location ourselves.
+        )
+
+    async def aclose(self) -> None:
+        await self._http.aclose()

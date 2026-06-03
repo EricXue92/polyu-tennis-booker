@@ -74,3 +74,36 @@ def test_booking_result_has_three_outcomes():
     from src.http_client import BookingResult
     assert {BookingResult.SUCCESS, BookingResult.OCCUPIED, BookingResult.ERROR}
     assert len(list(BookingResult)) == 3
+
+
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_client_constructs_with_required_session_state():
+    from src.http_client import PolyUHttpClient
+    client = PolyUHttpClient(
+        cookies={"JSESSIONID": "abc"},
+        csrf_token="tok-1",
+        fb_user_id="432567",
+    )
+    assert client.csrf_token == "tok-1"
+    assert client.fb_user_id == "432567"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_client_sets_chrome_user_agent_and_polyu_referer():
+    # Defensive: mimic the captured Playwright Chromium headers so PolyU
+    # doesn't 4xx us for "non-browser" requests. The exact UA string from
+    # the trace; if PolyU updates their detection, this is the knob.
+    from src.http_client import PolyUHttpClient
+    client = PolyUHttpClient(
+        cookies={"JSESSIONID": "abc"},
+        csrf_token="tok-1",
+        fb_user_id="432567",
+    )
+    headers = client._http.headers  # httpx.AsyncClient.headers
+    assert "Chrome" in headers["user-agent"]
+    assert "polyu.edu.hk" in headers.get("referer", "polyu.edu.hk")
+    await client.aclose()
