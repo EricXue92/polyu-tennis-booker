@@ -39,18 +39,16 @@ POLYU_USERNAME=... POLYU_PASSWORD=... \
 
 ## Architecture
 
-The booking flow spans two files. `src/booker.py` holds per-session
-primitives (`login`, `prepare_search`, `submit_search`,
-`slot_has_availability`, `click_through`, `submit_and_resolve`).
-`src/parallel_runner.py` orchestrates N `PolyUSession` instances in
-parallel (N = `len(slot_priority_for(target_date))`, one per priority
-slot). Runtime sequence: all sessions do `login` + `prepare_search`
-concurrently (before 08:30) → at 08:30:00.000 all fire `submit_search`
-simultaneously → each probes its own assigned slot via
-`slot_has_availability` → each calls `click_through` (cell-click + Next
-+ agreement-tick) → `submit_and_resolve` is gated by a single-dequeuer
-coordinator so Submits happen strictly in priority rank order. The first
-SUCCESS sets a shared win event and the others exit cleanly.
+The booking flow spans three files. `src/booker.py:run` does Playwright
+login at 08:29, extracts session state (cookies + CSRFToken + fbUserId)
+via `bootstrap_http_client`, closes the browser, sleeps to 08:30:00.000,
+and hands off to `src/http_booker.py:book_via_http`. That orchestrator
+calls `PolyUHttpClient.search()` (one HTTP POST), then iterates priority
+slots in rank order calling `client.try_book()` serially: SUCCESS wins,
+OCCUPIED advances to the next rank, ERROR aborts. The client
+(`src/http_client.py`) issues all three booking POSTs (timetable.json,
+make_book.do, make_book_submit.do) over raw httpx — no Playwright on
+the hot path.
 
 Things that aren't obvious from a single file:
 
@@ -73,27 +71,16 @@ Things that aren't obvious from a single file:
   would let the booker run before 08:30 HKT (e.g., `skip_sleep=true`,
   removing the `sleep_until_hkt` call, lowering `TRIGGER_TIME_HKT`).
 
-- **Two-phase sleep — login is intentionally BEFORE 08:30.** `run()` sleeps
-  twice: first to `TRIGGER_TIME_HKT - PRELOGIN_LEAD_SECONDS` (08:29:00),
-  then runs `login` + `prepare_search` (Tennis dropdown + date), then
-  sleeps again to 08:30:00.000, then fires `submit_search`. This lets the
-  Search request land within ~1s of the slot-open instant instead of the
-  ~20s it took when login started at 08:30. The "never run before 08:30"
-  rule applies to the *booking action* (Search, probe, click cell, Submit)
-  — logging in earlier is fine and is what makes the 08:30 click hit fast.
-  Do not collapse the two sleeps back into one.
-
-- **Parallel booking via single-dequeuer coordinator.**
-  `src/parallel_runner.py:run_parallel` runs N `PolyUSession` instances
-  concurrently (N = `len(slot_priority_for(target_date))`, one session per
-  priority slot). All N do `login` + `prepare_search` before 08:30; at
-  08:30:00.000 they all fire Search and probe their assigned slot in
-  parallel. The final Submit click is serialized in priority rank order by
-  a single-dequeuer coordinator — the first session to successfully Submit
-  sets a shared win event, and the others exit cleanly. This replaces the
-  old sequential `book_slot` retry loop, which lost popular slots in a
-  click-through window long enough for another user to commit during our
-  probe→Submit gap.
+- **Two-phase sleep — login is intentionally BEFORE 08:30.** `run()`
+  sleeps twice: first to `TRIGGER_TIME_HKT - PRELOGIN_LEAD_SECONDS`
+  (08:29:00), runs Playwright `login` (~2-3s) and `bootstrap_http_client`
+  to extract cookies + CSRFToken + fbUserId, closes the browser, then
+  sleeps again to 08:30:00.000 before calling `book_via_http`. HTTP
+  login is much faster than the old Playwright login + dropdown + date
+  flow, but we keep the 60s lead as a buffer — running closer than that
+  risks landing the Search POST a few hundred ms after 08:30 if the CI
+  runner is busy. Do not collapse the two sleeps into one — landing
+  Search exactly at 08:30:00.000 is the entire point.
 
 - **`skip_sleep` default MUST stay `false` in book.yml.** CF Worker calls
   `workflow_dispatch` with no inputs, so defaults apply. If `skip_sleep`
@@ -141,47 +128,45 @@ Things that aren't obvious from a single file:
   if so, raises `LoginFailed` distinctly so wrong-credentials show up as a
   meaningful failure, not a downstream selector timeout.
 
-- **Race window is probe→Submit; failures advance to next rank.**
-  PolyU only commits the slot on final Submit, so another user can grab
-  it any time during probe → click → Next → checkbox → Submit (~3s
-  window). Each session targets exactly one assigned slot: if
-  `slot_has_availability` returns false, the session raises
-  `_SlotUnavailable` and exits cleanly — the coordinator skips it and
-  advances to the next rank. If `submit_and_resolve` returns
-  `BookingResult.OCCUPIED` ("Facility is occupied" banner) or `ERROR`,
-  the coordinator moves on to the next ready session. Screenshots are
-  per-session (e.g. `failure_s0.png`, `failure_s1.png`).
+- **Race window is search→Submit; failures advance to next rank.**
+  `book_via_http` POSTs the Search at 08:30:00, parses the JSON response
+  to find which (facility, time) pairs are free, then POSTs cell-click +
+  final Submit serially in priority rank order. Race window from Search
+  fire to first Submit hitting PolyU: ~4.5-5.0s (dominated by PolyU's
+  ~4s server-side Search latency, then 2 cheap httpx POSTs). If the
+  first try_book returns OCCUPIED, the orchestrator advances to the
+  next rank within ~400ms. ERROR (auth lost, 5xx, unexpected redirect)
+  aborts the whole run to avoid burning through priorities on a broken
+  session — the watchdog email then has a meaningful failure to surface.
 
-- **Submit detects failure in ~1s, not 20s.** After clicking Submit,
-  `submit_and_resolve` races two waiters: `wait_for_url` (success — page
-  navigates away from `make_book_submit.do`) against `wait_for_selector`
-  on the "Facility is occupied" banner (known failure). Without the race,
-  the URL waiter eats the full 20s `DEFAULT_TIMEOUT_MS` before the
-  coordinator can advance to the next rank — by which time the
-  next-priority slot is also gone. The known banner phrase is hardcoded;
-  unknown error pages still fall through to the 20s timeout and are
-  captured in `post_submit_<session_id>.png`.
+- **Submit success/failure detection is direct, no timeout.** With
+  Playwright we raced `wait_for_url` against `wait_for_selector("Facility
+  is occupied")` to avoid a 20s URL-waiter eating the rank-advance
+  budget. With HTTP, `try_book` inspects the Submit response's Location
+  header: `make_book_result.do` ⇒ SUCCESS, banner in body or
+  `make_book_submit.do` ⇒ OCCUPIED, anything else ⇒ ERROR. Result is
+  decided in one round-trip (~400ms) instead of a 20s waiter race.
 
 - **Password redaction.** `src/log.py:build_logger` installs a filter that
   replaces the password string with `***` in log messages and args before any
   handler sees them. Playwright errors can quote field values, so all logging
   must go through this logger — don't `print()` or use the root logger.
 
-- **Artifacts.** `click_through` saves `pre_submit_<session_id>.png`
-  (after ticking the agreement checkbox, before final Submit).
-  `submit_and_resolve` saves `post_submit_<session_id>.png` (after Submit
-  or on known failure). CI uploads the `artifacts/` directory on every
-  run, including failures. `pre_submit_s0.png` (the rank-0 session) is
-  the key artifact to inspect after a dry-run smoke test.
+- **Artifacts.** The HTTP flow doesn't produce screenshots — the
+  request/response shapes are baked into `src/http_client.py` and tested
+  offline. For new live failures (e.g. PolyU UI changes), use
+  `scripts/capture_http.py` to grab a fresh HTTP trace under Playwright
+  (login + make_book.do navigation only, since the full booking flow no
+  longer needs Playwright). CI uploads any `artifacts/` content if
+  present, but the booker itself doesn't create files anymore.
 
 - **Dry-run smoke tests are time-dependent.** `--dry-run --skip-sleep`
-  exercises the full flow up to (but not including) Submit, but only if a
-  priority slot is actually free. After 08:30 HKT, popular slots are gone;
-  each session's `slot_has_availability` probe returns false, the session
-  raises `_SlotUnavailable`, and the run exits with code 1 before any
-  `pre_submit_*.png` is produced. To validate `click_through` and
-  `submit_and_resolve` end-to-end, dry-run before 08:30 HKT or temporarily
-  widen `SLOT_PRIORITY` to include a known-free off-peak window.
+  exercises the full HTTP flow (search + try_book serially in rank order),
+  but only if a priority slot is actually free. After 08:30 HKT, popular
+  slots are gone and `book_via_http` exits with code 1 before any booking
+  is placed. To test the full flow end-to-end, dry-run before 08:30 HKT
+  or temporarily widen `SLOT_PRIORITY` to include a known-free off-peak
+  window.
 
 - **Tests are offline.** All tests in `tests/` use fakes (e.g. `make_probe`
   in `test_slot_finder.py`) — no network, no Playwright launch. Don't add
