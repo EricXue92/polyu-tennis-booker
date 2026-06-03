@@ -1,29 +1,22 @@
-"""Capture PolyU HTTP requests during a booking flow.
+"""Capture PolyU HTTP requests during login and make_book.do navigation.
 
-Runs the existing Playwright booker phases (login → prepare_search →
-submit_search → click_through → optional submit_and_resolve) while
-attaching network hooks to record every request and response to
-`artifacts/http_trace.json`. The trace is the source of truth for the
-Phase 2 PolyUHttpClient implementation.
+Logs in via Playwright and navigates to make_book.do with network hooks
+attached, dumping every request/response to `artifacts/http_trace.json`.
+Used to re-discover the post-login CSRFToken/fbUserId shape if PolyU
+updates its HTML — the full booking-flow HTTP shapes (timetable.json,
+make_book.do POST, make_book_submit.do POST) are already baked into
+`src/http_client.py` from the original Phase 1 capture.
 
 Usage:
     POLYU_USERNAME=... POLYU_PASSWORD=... \\
         uv run python scripts/capture_http.py \\
-            --slot 12:30-13:30 \\
             --headed
 
-Add --no-submit to stop before the final Submit click (recording every
-request up to the agreement checkbox tick but not the final POST). To
-capture the Submit + success response, omit --no-submit and pick a
-genuinely free off-peak slot (you will actually book it; cancel after
-via PolyU's UI).
-
-NOTE (Phase 2b): This script no longer drives the full booking flow.
-After login + make_book.do navigation, it stops — the HTTP request shapes
-are now baked into src/http_client.py. If PolyU changes those shapes,
-re-capture via Chrome DevTools → Network → Save All As HAR rather than
-extending this script. The --slot flag is retained for argparse backwards
-compatibility but is unused.
+NOTE (Phase 2b): The --slot flag is retained for argparse backwards
+compatibility but is unused. If you need to re-capture the full booking
+flow (e.g. PolyU changed the make_book.do POST shape), do it manually
+via Chrome DevTools → Network → Save All As HAR rather than extending
+this script.
 """
 from __future__ import annotations
 
