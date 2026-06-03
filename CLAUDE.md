@@ -115,6 +115,17 @@ Things that aren't obvious from a single file:
   and update the dataclass. `require()` raises a clear error if any field is
   left as the `PENDING_DISCOVERY` sentinel.
 
+- **HTTP request shapes are externalized too.** `scripts/capture_http.py`
+  is the HTTP analogue of `discover_selectors.py`: it runs the booking
+  flow under Playwright with `context.on("request"/"response")` hooks
+  and dumps `artifacts/http_trace.json` (passwords and cookie values
+  redacted). Used by `src/http_client.py` to build/maintain the raw
+  HTTP request templates that replace Playwright on the hot path.
+  Re-run when PolyU changes its booking endpoints or form fields
+  (symptom: `PolyUHttpClient` 4xxs or returns unexpected response
+  shape). Requires a known free off-peak slot — see the comment block
+  at the top of the script for usage.
+
 - **Date format gotcha.** The PolyU page uses two different formats:
   the `searchDate` input expects `DD/MM/YYYY` (slashes), while timeslot cells
   carry `data-slot-date="DD-MM-YYYY"` (dashes). `available_slot_cell` is a
