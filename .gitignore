@@ -6,6 +6,10 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+# macOS metadata
+.DS_Store
+# Claude Code session state (cron locks, etc.)
+.claude/
 # Playwright artifacts
 test-results/
 playwright-report/
