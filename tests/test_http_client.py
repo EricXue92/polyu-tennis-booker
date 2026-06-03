@@ -50,3 +50,27 @@ def test_parse_fb_user_id_raises_when_missing():
     from src.http_client import HtmlParseError
     with pytest.raises(HtmlParseError):
         parse_fb_user_id("<html>no fbUserId here</html>")
+
+
+from datetime import datetime
+
+
+def test_available_slot_is_immutable():
+    from src.http_client import AvailableSlot
+    slot = AvailableSlot(
+        facility_id=11,
+        facility_name="Tennis Court No. 2",
+        center_id=1,
+        center_name="Shaw Sports Complex",
+        start_dt=datetime(2026, 6, 10, 12, 30),
+        end_dt=datetime(2026, 6, 10, 13, 30),
+    )
+    import pytest
+    with pytest.raises(Exception):
+        slot.facility_id = 99  # frozen dataclass
+
+
+def test_booking_result_has_three_outcomes():
+    from src.http_client import BookingResult
+    assert {BookingResult.SUCCESS, BookingResult.OCCUPIED, BookingResult.ERROR}
+    assert len(list(BookingResult)) == 3

@@ -12,7 +12,27 @@ plan.
 """
 from __future__ import annotations
 
+import enum
 import re
+from dataclasses import dataclass
+from datetime import datetime
+
+
+@dataclass(frozen=True)
+class AvailableSlot:
+    """A bookable (facility, time-range) pair returned by search()."""
+    facility_id: int
+    facility_name: str
+    center_id: int
+    center_name: str
+    start_dt: datetime
+    end_dt: datetime
+
+
+class BookingResult(enum.Enum):
+    SUCCESS = enum.auto()
+    OCCUPIED = enum.auto()
+    ERROR = enum.auto()
 
 
 class HtmlParseError(RuntimeError):
