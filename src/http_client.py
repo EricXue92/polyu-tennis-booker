@@ -16,6 +16,9 @@ import enum
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, time
+from urllib.parse import quote
+
+import httpx
 
 
 @dataclass(frozen=True)
@@ -79,9 +82,6 @@ def parse_fb_user_id(html: str) -> str:
     )
 
 
-import httpx
-
-
 _CHROME_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -93,6 +93,19 @@ _DEFAULT_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do",
 }
+
+
+_MONTH_ABBR = ("", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _fmt_polyu_dt(dt: datetime) -> str:
+    """Format datetime as 'DD MMM YYYY HH:MM' with English month abbreviation.
+
+    Locale-independent — strftime('%b') depends on LC_TIME, which can
+    produce 'juin' on a French system and break PolyU's parser.
+    """
+    return f"{dt.day:02d} {_MONTH_ABBR[dt.month]} {dt.year} {dt.hour:02d}:{dt.minute:02d}"
 
 
 class PolyUHttpClient:
@@ -201,17 +214,18 @@ class PolyUHttpClient:
         from src.config import (
             MAKE_BOOK_URL,
             MAKE_BOOK_SUBMIT_URL,
-            MAKE_BOOK_RESULT_URL,
             TENNIS_ACTV_ID,
             TENNIS_DATA_SET_ID,
         )
 
         date_str = slot.start_dt.strftime("%d/%m/%Y")
-        dt_fmt = "%d %b %Y %H:%M"  # e.g. "10 Jun 2026 12:30"
+        # Pre-encode the date in the inner searchFormString. The outer form-encoding
+        # will encode the resulting %2F again to %252F, matching the captured trace.
+        inner_date = quote(date_str, safe="")  # "10%2F06%2F2026"
         search_form_str = (
             f"fbUserId={self.fb_user_id}&bookType=INDV"
             f"&dataSetId={TENNIS_DATA_SET_ID}&actvId={TENNIS_ACTV_ID}"
-            f"&searchDate={date_str}&ctrId={slot.center_id}&facilityId="
+            f"&searchDate={inner_date}&ctrId={slot.center_id}&facilityId="
         )
 
         cell_form = {
@@ -229,8 +243,8 @@ class PolyUHttpClient:
             "searchFormString": search_form_str,
             "boMakeBookFacilities[0].ctrId": str(slot.center_id),
             "boMakeBookFacilities[0].facilityId": str(slot.facility_id),
-            "boMakeBookFacilities[0].startDateTime": slot.start_dt.strftime(dt_fmt),
-            "boMakeBookFacilities[0].endDateTime": slot.end_dt.strftime(dt_fmt),
+            "boMakeBookFacilities[0].startDateTime": _fmt_polyu_dt(slot.start_dt),
+            "boMakeBookFacilities[0].endDateTime": _fmt_polyu_dt(slot.end_dt),
             "CSRFToken": self.csrf_token,
         }
 
@@ -239,8 +253,15 @@ class PolyUHttpClient:
         except httpx.HTTPError:
             return BookingResult.ERROR
 
-        if cell_resp.status_code != 302 or "make_book_submit" not in cell_resp.headers.get("location", ""):
+        if cell_resp.status_code == 302 and "make_book_submit" in cell_resp.headers.get("location", ""):
+            pass  # cell click accepted — fall through to Submit
+        elif cell_resp.status_code in (200, 302) and (
+            "Facility is occupied" in (cell_resp.text or "")
+            or "make_book" in cell_resp.headers.get("location", "")
+        ):
             return BookingResult.OCCUPIED
+        else:
+            return BookingResult.ERROR
 
         submit_fields = {
             "dataSetId": str(TENNIS_DATA_SET_ID),
@@ -270,8 +291,8 @@ class PolyUHttpClient:
             "boMakeBookFacilities[0].centerName": slot.center_name,
             "boMakeBookFacilities[0].facilityId": str(slot.facility_id),
             "boMakeBookFacilities[0].facilityName": slot.facility_name,
-            "boMakeBookFacilities[0].startDateTime": slot.start_dt.strftime(dt_fmt),
-            "boMakeBookFacilities[0].endDateTime": slot.end_dt.strftime(dt_fmt),
+            "boMakeBookFacilities[0].startDateTime": _fmt_polyu_dt(slot.start_dt),
+            "boMakeBookFacilities[0].endDateTime": _fmt_polyu_dt(slot.end_dt),
             "declare": "on",
             "CSRFToken": self.csrf_token,
         }

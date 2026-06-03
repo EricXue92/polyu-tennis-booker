@@ -343,6 +343,11 @@ async def test_try_book_sends_correct_cell_click_body():
     # Format from the trace: "10 Jun 2026 12:30" with spaces URL-encoded.
     assert "boMakeBookFacilities%5B0%5D.startDateTime=10+Jun+2026+12%3A30" in body
     assert "boMakeBookFacilities%5B0%5D.endDateTime=10+Jun+2026+13%3A30" in body
+    # Inner searchFormString must have pre-encoded slashes (becomes %252F after outer encode)
+    assert "searchFormString=" in body
+    # After outer decode, the inner value should have %2F (pre-encoded).
+    # In the wire body, the slashes appear as %252F.
+    assert "%252F06%252F2026" in body
 
     # Submit body is multipart with the agreement checkbox set.
     assert "multipart/form-data" in captured["submit_ct"]
@@ -354,3 +359,47 @@ async def test_try_book_sends_correct_cell_click_body():
     assert 'name="boMakeBookFacilities[0].startDateTime"' in sb and "10 Jun 2026 12:30" in sb
     assert 'name="declare"' in sb and "on" in sb
     assert 'name="CSRFToken"' in sb and "tok-Z" in sb
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_try_book_error_on_unexpected_cell_click_status():
+    # If cell-click returns 500 (server error) or 401 (auth lost), we must
+    # surface ERROR — not OCCUPIED — so the orchestrator can stop instead
+    # of burning through all priorities.
+    from src.http_client import PolyUHttpClient, BookingResult
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+    ).mock(return_value=Response(500, text="Internal Server Error"))
+
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="tok", fb_user_id="432567")
+    try:
+        result = await client.try_book(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert result is BookingResult.ERROR
+
+
+def test_fmt_polyu_dt_is_locale_independent():
+    from src.http_client import _fmt_polyu_dt
+    from datetime import datetime
+    # Even if LC_TIME is set to a non-English locale, the formatter must
+    # produce English month abbreviations.
+    import locale
+    try:
+        original = locale.setlocale(locale.LC_TIME)
+        # Try a few non-English locales; skip the test if none are available.
+        for loc in ("fr_FR.UTF-8", "de_DE.UTF-8", "ja_JP.UTF-8", "C"):
+            try:
+                locale.setlocale(locale.LC_TIME, loc)
+                break
+            except locale.Error:
+                continue
+        result = _fmt_polyu_dt(datetime(2026, 6, 10, 12, 30))
+        assert result == "10 Jun 2026 12:30"
+    finally:
+        try:
+            locale.setlocale(locale.LC_TIME, original)
+        except locale.Error:
+            pass
