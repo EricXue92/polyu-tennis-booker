@@ -292,7 +292,10 @@ async def submit_and_resolve(
 
 async def run(*, dry_run: bool = False, skip_sleep: bool = False) -> int:
     """Returns 0 on successful booking, 1 on no-slot-available or any failure."""
-    from src.parallel_runner import book_parallel
+    from playwright.async_api import async_playwright
+
+    from src.config import MAKE_BOOK_URL
+    from src.http_booker import book_via_http
 
     username = os.environ["POLYU_USERNAME"]
     password = os.environ["POLYU_PASSWORD"]
@@ -319,16 +322,34 @@ async def run(*, dry_run: bool = False, skip_sleep: bool = False) -> int:
         await asyncio.sleep(delay)
         log.info("woke up for pre-login phase")
 
-    log.info("preparing %d parallel session(s) for slots %s", len(slots), slots)
+    # Phase 1: Playwright login → extract session state → close browser.
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        try:
+            context = await browser.new_context()
+            page = await context.new_page()
+            page.set_default_timeout(20_000)
+            await login(page, username, password, log)
+            # Defensive: make sure we're on make_book.do (login normally
+            # redirects there but PolyU could theoretically land us on a
+            # password-expired page or a different post-login screen).
+            if "make_book.do" not in page.url:
+                log.info("post-login url=%s; navigating to make_book.do", page.url)
+                await page.goto(MAKE_BOOK_URL, wait_until="domcontentloaded", timeout=DEFAULT_TIMEOUT_MS)
+            client = await bootstrap_http_client(page, log=log)
+        finally:
+            await browser.close()
 
-    return await book_parallel(
-        username=username,
-        password=password,
-        target_date=target_date,
-        slots=slots,
-        dry_run=dry_run,
-        skip_sleep=skip_sleep,
-    )
+    # Phase 2: sleep until 08:30:00.000, then fire the HTTP booking flow.
+    try:
+        if not skip_sleep:
+            delay = seconds_until_hkt_time(TRIGGER_TIME_HKT)
+            log.info("sleeping %.3fs until HKT %s (trigger)", delay, TRIGGER_TIME_HKT)
+            await asyncio.sleep(delay)
+            log.info("woke up at trigger time, calling search")
+        return await book_via_http(client, target_date, slots, dry_run, log=log)
+    finally:
+        await client.aclose()
 
 
 def main() -> None:
