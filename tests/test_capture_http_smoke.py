@@ -8,9 +8,9 @@ import pytest
 from scripts.capture_http import parse_args, parse_slot
 
 
-def test_parse_args_requires_slot():
-    with pytest.raises(SystemExit):
-        parse_args([])
+def test_parse_args_works_without_slot():
+    args = parse_args([])  # no flags
+    assert args.slot is None
 
 
 def test_parse_args_defaults_target_date_to_today_plus_7():

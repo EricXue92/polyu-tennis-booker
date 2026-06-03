@@ -121,26 +121,27 @@ async def run(*, dry_run: bool = False, skip_sleep: bool = False) -> int:
         await asyncio.sleep(delay)
         log.info("woke up for pre-login phase")
 
-    # Phase 1: Playwright login → extract session state → close browser.
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        try:
-            context = await browser.new_context()
-            page = await context.new_page()
-            page.set_default_timeout(20_000)
-            await login(page, username, password, log)
-            # Defensive: make sure we're on make_book.do (login normally
-            # redirects there but PolyU could theoretically land us on a
-            # password-expired page or a different post-login screen).
-            if "make_book.do" not in page.url:
-                log.info("post-login url=%s; navigating to make_book.do", page.url)
-                await page.goto(MAKE_BOOK_URL, wait_until="domcontentloaded", timeout=DEFAULT_TIMEOUT_MS)
-            client = await bootstrap_http_client(page, log=log)
-        finally:
-            await browser.close()
-
-    # Phase 2: sleep until 08:30:00.000, then fire the HTTP booking flow.
+    client = None
     try:
+        # Phase 1: Playwright login → extract session state → close browser.
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            try:
+                context = await browser.new_context()
+                page = await context.new_page()
+                page.set_default_timeout(20_000)
+                await login(page, username, password, log)
+                # Defensive: make sure we're on make_book.do (login normally
+                # redirects there but PolyU could theoretically land us on a
+                # password-expired page or a different post-login screen).
+                if "make_book.do" not in page.url:
+                    log.info("post-login url=%s; navigating to make_book.do", page.url)
+                    await page.goto(MAKE_BOOK_URL, wait_until="domcontentloaded", timeout=DEFAULT_TIMEOUT_MS)
+                client = await bootstrap_http_client(page, log=log)
+            finally:
+                await browser.close()
+
+        # Phase 2: sleep until 08:30:00.000, then fire the HTTP booking flow.
         if not skip_sleep:
             delay = seconds_until_hkt_time(TRIGGER_TIME_HKT)
             log.info("sleeping %.3fs until HKT %s (trigger)", delay, TRIGGER_TIME_HKT)
@@ -148,7 +149,8 @@ async def run(*, dry_run: bool = False, skip_sleep: bool = False) -> int:
             log.info("woke up at trigger time, calling search")
         return await book_via_http(client, target_date, slots, dry_run, log=log)
     finally:
-        await client.aclose()
+        if client is not None:
+            await client.aclose()
 
 
 def main() -> None:

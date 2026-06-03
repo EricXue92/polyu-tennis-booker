@@ -14,7 +14,7 @@ morning at 08:30 HKT. Runs as a GitHub Actions cron job (entrypoint
 uv sync                                   # install deps (Python 3.12+, Playwright)
 uv run playwright install chromium        # one-time browser install
 uv run pytest                             # run all unit tests (offline, no network/browser)
-uv run pytest tests/test_slot_finder.py::test_returns_all_when_all_available
+uv run pytest tests/test_http_booker.py::test_book_via_http_returns_0_on_first_success
 uv run book-tennis --dry-run --skip-sleep # local end-to-end (needs POLYU_USERNAME/POLYU_PASSWORD)
 ```
 
@@ -113,16 +113,6 @@ Things that aren't obvious from a single file:
   shape). Requires a known free off-peak slot — see the comment block
   at the top of the script for usage.
 
-- **Date format gotcha.** The PolyU page uses two different formats:
-  the `searchDate` input expects `DD/MM/YYYY` (slashes), while timeslot cells
-  carry `data-slot-date="DD-MM-YYYY"` (dashes). `available_slot_cell` is a
-  format-string template; the booker substitutes both forms from the same
-  `target_date`. Don't unify them.
-
-- **Datepicker is set via JS, not typed.** `searchDate` is a readonly
-  jQuery-UI datepicker. The booker calls `page.evaluate` with
-  `$('#searchDate').val(...).trigger('change')` rather than `page.fill`.
-
 - **Login verification.** After submitting credentials, `login()` checks the
   URL still contains `loginhome` or that the username field is still present —
   if so, raises `LoginFailed` distinctly so wrong-credentials show up as a
@@ -168,8 +158,8 @@ Things that aren't obvious from a single file:
   or temporarily widen `SLOT_PRIORITY` to include a known-free off-peak
   window.
 
-- **Tests are offline.** All tests in `tests/` use fakes (e.g. `make_probe`
-  in `test_slot_finder.py`) — no network, no Playwright launch. Don't add
+- **Tests are offline.** All tests in `tests/` use fakes (e.g. `_FakeClient`
+  in `test_http_booker.py`) — no network, no Playwright launch. Don't add
   live integration tests; verify changes by running `--dry-run` against the
   real site locally and checking artifacts.
 

@@ -36,9 +36,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--slot",
-        required=True,
-        help="Slot to target, format HH:MM-HH:MM (e.g. 12:30-13:30). "
-        "Must actually be free at run time.",
+        default=None,
+        help="(Deprecated as of Phase 2b — unused, retained for argparse compatibility.)",
     )
     parser.add_argument(
         "--no-submit",
@@ -80,9 +79,8 @@ async def main_async(args: argparse.Namespace) -> int:
     log = build_logger("capture", secret=password)
 
     target_date = date.fromisoformat(args.target_date)
-    # Parse the --slot arg even though we don't use it — validates the format
-    # so users get a clear error early.
-    _start, _end = parse_slot(args.slot)
+    if args.slot:
+        _start, _end = parse_slot(args.slot)
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
