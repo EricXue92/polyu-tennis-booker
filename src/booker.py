@@ -101,7 +101,9 @@ async def bootstrap_http_client(page, *, log: logging.Logger):
         len(polyu_cookies), len(by_name), fb_user_id, csrf_token[:8],
     )
     if multipath:
-        log.info("path-scoped duplicates: %s", multipath)
+        # repr() the dict so Python logging doesn't treat the single dict
+        # argument as a %(name)s mapping and crash with TypeError on %s.
+        log.info("path-scoped duplicates: %s", repr(multipath))
     return PolyUHttpClient(
         cookies=cookies,
         csrf_token=csrf_token,
