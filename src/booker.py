@@ -65,22 +65,43 @@ async def bootstrap_http_client(page, *, log: logging.Logger):
     Caller is responsible for calling `client.aclose()`. Raises HtmlParseError
     if the page is not the expected post-login HTML (e.g. password-expired
     redirect, unexpected error page).
+
+    Path-scoped cookies are preserved: PolyU runs two J2EE apps on the same
+    host (`/poss` login + `/starspossfbstud` booking), each with its own
+    path-scoped JSESSIONID. Collapsing them by name would silently send the
+    wrong one and produce a 403 with a fresh anonymous session.
     """
+    import httpx
+
     from src.http_client import PolyUHttpClient, parse_csrf_token, parse_fb_user_id
 
     html = await page.content()
     csrf_token = parse_csrf_token(html)
     fb_user_id = parse_fb_user_id(html)
     raw_cookies = await page.context.cookies()
-    cookies = {
-        c["name"]: c["value"]
-        for c in raw_cookies
-        if "polyu.edu.hk" in c.get("domain", "")
-    }
+    polyu_cookies = [
+        c for c in raw_cookies if "polyu.edu.hk" in c.get("domain", "")
+    ]
+    cookies = httpx.Cookies()
+    for c in polyu_cookies:
+        cookies.set(
+            c["name"],
+            c["value"],
+            domain=c.get("domain", ""),
+            path=c.get("path", "/"),
+        )
+    # Diagnostic: log unique cookie names AND any name that appears with
+    # multiple paths (the original collision symptom).
+    by_name: dict[str, list[str]] = {}
+    for c in polyu_cookies:
+        by_name.setdefault(c["name"], []).append(c.get("path", "/"))
+    multipath = {n: paths for n, paths in by_name.items() if len(paths) > 1}
     log.info(
-        "bootstrap_http_client: %d cookies, fbUserId=%s, csrf=%s...",
-        len(cookies), fb_user_id, csrf_token[:8],
+        "bootstrap_http_client: %d cookies (%d unique names), fbUserId=%s, csrf=%s...",
+        len(polyu_cookies), len(by_name), fb_user_id, csrf_token[:8],
     )
+    if multipath:
+        log.info("path-scoped duplicates: %s", multipath)
     return PolyUHttpClient(
         cookies=cookies,
         csrf_token=csrf_token,

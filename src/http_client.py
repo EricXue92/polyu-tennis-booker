@@ -131,7 +131,7 @@ class PolyUHttpClient:
     def __init__(
         self,
         *,
-        cookies: dict[str, str],
+        cookies,
         csrf_token: str,
         fb_user_id: str,
         timeout: float = 10.0,

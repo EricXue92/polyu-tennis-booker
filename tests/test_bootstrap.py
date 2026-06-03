@@ -34,10 +34,10 @@ async def test_bootstrap_extracts_session_state_from_post_login_page():
     page = _FakePage(
         html=_FIXTURE_HTML,
         cookies=[
-            {"name": "JSESSIONID", "value": "abc123", "domain": "www40.polyu.edu.hk"},
-            {"name": "AWSALB", "value": "lb-token", "domain": "www40.polyu.edu.hk"},
+            {"name": "JSESSIONID", "value": "abc123", "domain": "www40.polyu.edu.hk", "path": "/starspossfbstud"},
+            {"name": "AWSALB", "value": "lb-token", "domain": "www40.polyu.edu.hk", "path": "/"},
             # A cookie from an unrelated domain — must be filtered out.
-            {"name": "ga", "value": "tracking", "domain": "google-analytics.com"},
+            {"name": "ga", "value": "tracking", "domain": "google-analytics.com", "path": "/"},
         ],
     )
     import logging
@@ -70,3 +70,36 @@ async def test_bootstrap_raises_when_html_is_unexpected():
     log = logging.getLogger("test")
     with pytest.raises(HtmlParseError):
         await bootstrap_http_client(page, log=log)
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_preserves_path_scoped_duplicates():
+    """PolyU has two JSESSIONIDs (Path=/poss anonymous + Path=/starspossfbstud
+    authenticated). The bootstrap helper must keep BOTH so httpx sends the
+    right one to /starspossfbstud/* endpoints — collapsing by name causes 403."""
+    from src.booker import bootstrap_http_client
+
+    page = _FakePage(
+        html=_FIXTURE_HTML,
+        cookies=[
+            {"name": "JSESSIONID", "value": "ANON",
+             "domain": "www40.polyu.edu.hk", "path": "/poss"},
+            {"name": "JSESSIONID", "value": "AUTH",
+             "domain": "www40.polyu.edu.hk", "path": "/starspossfbstud"},
+            {"name": "LtpaToken2", "value": "sso",
+             "domain": "www40.polyu.edu.hk", "path": "/"},
+        ],
+    )
+    import logging
+    log = logging.getLogger("test")
+    client = await bootstrap_http_client(page, log=log)
+    try:
+        # The httpx cookie jar should hold both JSESSIONIDs.
+        jar = client._http.cookies
+        # Use path-scoped get to verify both survive.
+        auth = jar.get("JSESSIONID", path="/starspossfbstud")
+        anon = jar.get("JSESSIONID", path="/poss")
+        assert auth == "AUTH"
+        assert anon == "ANON"
+    finally:
+        await client.aclose()
