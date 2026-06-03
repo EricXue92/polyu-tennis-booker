@@ -23,7 +23,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -92,16 +92,18 @@ async def main_async(args: argparse.Namespace) -> int:
 
     trace: list[dict] = []
     seq = 0
+    seq_by_request: dict[int, int] = {}
 
     def on_request(request) -> None:
         nonlocal seq
         if "www40.polyu.edu.hk" not in request.url:
             return
         seq += 1
+        seq_by_request[id(request)] = seq
         entry = {
             "kind": "request",
             "seq": seq,
-            "ts": datetime.utcnow().isoformat() + "Z",
+            "ts": datetime.now(timezone.utc).isoformat(),
             "url": request.url,
             "method": request.method,
             "headers": dict(request.headers),
@@ -126,8 +128,8 @@ async def main_async(args: argparse.Namespace) -> int:
             body = f"<binary {ctype}, {response.headers.get('content-length', '?')} bytes>"
         entry = {
             "kind": "response",
-            "seq": seq,
-            "ts": datetime.utcnow().isoformat() + "Z",
+            "seq": seq_by_request.get(id(response.request), -1),
+            "ts": datetime.now(timezone.utc).isoformat(),
             "url": response.url,
             "status": response.status,
             "headers": dict(response.headers),
