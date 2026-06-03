@@ -24,9 +24,9 @@ Hot path = 3 POSTs:
 |---|---|---|---|
 | **Search** | `POST /starspossfbstud/secure/ui_make_book/timetable.json?CSRFToken=<T>` | form-urlencoded: `CSRFToken=<T>&fbUserId=<U>&bookType=INDV&dataSetId=18&actvId=10&searchDate=DD/MM/YYYY&ctrId=1&facilityId=&showCourtAreaDetails=true` | 200 JSON. `data.timeSlotColumns[].timeSlots[]` each with `fromTime`, `toTime`, `facilityIds`, `occupiedFacilityIds`. |
 | **Cell + Next** | `POST /starspossfbstud/secure/ui_make_book/make_book.do` | form-urlencoded (see Task A4 for exact fields) | 302 → `/starspossfbstud/secure/ui_make_book/make_book_submit.do` on cell-acceptance |
-| **Final Submit** | `POST /starspossfbstud/secure/ui_make_book/make_book_submit.do` | multipart/form-data (30 fields, see Task A5) | 302 → `make_book_result.do` on SUCCESS; 302 → `make_book_submit.do` (or 200 with "Facility is occupied" banner) on OCCUPIED |
+| **Final Submit** | `POST /starspossfbstud/secure/ui_make_book/make_book_submit.do` | multipart/form-data (31 fields, see Task A5) | 302 → `make_book_result.do` on SUCCESS; 302 → `make_book_submit.do` (or 200 with "Facility is occupied" banner) on OCCUPIED |
 
-CSRFToken: one token used at login (form field), a different token issued in the post-login `make_book.do` HTML and used for both Search and Cell+Next. The final Submit body does NOT include CSRFToken (relies on session cookie).
+CSRFToken: one token used at login (form field), a different token issued in the post-login `make_book.do` HTML and used for both Search and Cell+Next. The final Submit body ALSO carries the same CSRFToken as the 31st field (verified against the captured trace; the session cookie is necessary but not sufficient — CSRFToken is also required).
 
 fbUserId: hidden `<input>` in post-login HTML — e.g. `<input type="hidden" id="fbUserId" name="fbUserId" value="432567"/>`.
 

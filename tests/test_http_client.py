@@ -353,3 +353,4 @@ async def test_try_book_sends_correct_cell_click_body():
     assert 'name="boMakeBookFacilities[0].facilityName"' in sb and "Tennis Court No. 2" in sb
     assert 'name="boMakeBookFacilities[0].startDateTime"' in sb and "10 Jun 2026 12:30" in sb
     assert 'name="declare"' in sb and "on" in sb
+    assert 'name="CSRFToken"' in sb and "tok-Z" in sb

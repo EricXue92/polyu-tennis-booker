@@ -273,6 +273,7 @@ class PolyUHttpClient:
             "boMakeBookFacilities[0].startDateTime": slot.start_dt.strftime(dt_fmt),
             "boMakeBookFacilities[0].endDateTime": slot.end_dt.strftime(dt_fmt),
             "declare": "on",
+            "CSRFToken": self.csrf_token,
         }
         # httpx multipart encoding: pass `files={}` to force multipart even
         # for text-only fields. Each value becomes (None, value) — None means
