@@ -107,3 +107,93 @@ async def test_client_sets_chrome_user_agent_and_polyu_referer():
     assert "Chrome" in headers["user-agent"]
     assert "polyu.edu.hk" in headers.get("referer", "polyu.edu.hk")
     await client.aclose()
+
+
+from datetime import date, datetime, time
+from pathlib import Path
+
+import respx
+from httpx import Response
+
+
+_FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _load_timetable_fixture() -> str:
+    return (_FIXTURES / "timetable_response.json").read_text()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_returns_free_slots_grouped_by_time():
+    from src.http_client import PolyUHttpClient, AvailableSlot
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/timetable.json"
+    ).mock(return_value=Response(200, text=_load_timetable_fixture()))
+
+    client = PolyUHttpClient(
+        cookies={"JSESSIONID": "abc"},
+        csrf_token="tok-1",
+        fb_user_id="432567",
+    )
+    try:
+        result = await client.search(date(2026, 6, 10))
+    finally:
+        await client.aclose()
+
+    # 12:30-13:30: court 10 occupied, court 11 free → 1 entry
+    free_1230 = result[(time(12, 30), time(13, 30))]
+    assert len(free_1230) == 1
+    assert free_1230[0].facility_id == 11
+    assert free_1230[0].facility_name == "Tennis Court No. 2"
+    assert free_1230[0].start_dt == datetime(2026, 6, 10, 12, 30)
+    assert free_1230[0].end_dt == datetime(2026, 6, 10, 13, 30)
+
+    # 13:30-14:30: both occupied → not in result map (or empty list)
+    assert result.get((time(13, 30), time(14, 30)), []) == []
+
+    # 18:30-19:30: both free → 2 entries
+    free_1830 = result[(time(18, 30), time(19, 30))]
+    assert len(free_1830) == 2
+    assert {s.facility_id for s in free_1830} == {10, 11}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_search_sends_correct_form_body():
+    from src.http_client import PolyUHttpClient
+
+    captured = {}
+
+    def record_and_respond(request):
+        captured["url"] = str(request.url)
+        captured["body"] = request.content.decode()
+        return Response(200, text=_load_timetable_fixture())
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/timetable.json"
+    ).mock(side_effect=record_and_respond)
+
+    client = PolyUHttpClient(
+        cookies={"JSESSIONID": "abc"},
+        csrf_token="tok-XYZ",
+        fb_user_id="999",
+    )
+    try:
+        await client.search(date(2026, 6, 10))
+    finally:
+        await client.aclose()
+
+    assert "CSRFToken=tok-XYZ" in captured["url"]
+    # Form body must contain these exact field=value pairs.
+    body = captured["body"]
+    assert "CSRFToken=tok-XYZ" in body
+    assert "fbUserId=999" in body
+    assert "bookType=INDV" in body
+    assert "dataSetId=18" in body
+    assert "actvId=10" in body
+    # PolyU expects DD/MM/YYYY with URL-encoded slashes.
+    assert "searchDate=10%2F06%2F2026" in body
+    assert "ctrId=1" in body
+    assert "showCourtAreaDetails=true" in body

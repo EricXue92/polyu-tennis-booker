@@ -15,7 +15,7 @@ from __future__ import annotations
 import enum
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, time
 
 
 @dataclass(frozen=True)
@@ -122,3 +122,67 @@ class PolyUHttpClient:
 
     async def aclose(self) -> None:
         await self._http.aclose()
+
+    async def search(
+        self,
+        target_date: "date",
+    ) -> dict[tuple["time", "time"], list[AvailableSlot]]:
+        """POST the Search/timetable endpoint and return free slots.
+
+        The response groups free (facility, time-range) pairs by (start, end)
+        time-of-day, so callers iterating priority slots can pick any free
+        facility for each priority time.
+        """
+        from src.config import (
+            TIMETABLE_URL,
+            TENNIS_ACTV_ID,
+            TENNIS_CENTER_NAME,
+            TENNIS_CTR_ID,
+            TENNIS_DATA_SET_ID,
+            TENNIS_FACILITIES,
+        )
+
+        date_str = target_date.strftime("%d/%m/%Y")
+        form = {
+            "CSRFToken": self.csrf_token,
+            "fbUserId": self.fb_user_id,
+            "bookType": "INDV",
+            "dataSetId": str(TENNIS_DATA_SET_ID),
+            "actvId": str(TENNIS_ACTV_ID),
+            "searchDate": date_str,
+            "ctrId": str(TENNIS_CTR_ID),
+            "facilityId": "",
+            "showCourtAreaDetails": "true",
+        }
+        resp = await self._http.post(
+            TIMETABLE_URL,
+            params={"CSRFToken": self.csrf_token},
+            data=form,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+
+        from datetime import datetime as _dt
+        out: dict[tuple[time, time], list[AvailableSlot]] = {}
+        for col in payload["data"]["timeSlotColumns"]:
+            for slot in col["timeSlots"]:
+                start = time.fromisoformat(slot["fromTime"])
+                end = time.fromisoformat(slot["toTime"])
+                start_dt = _dt.fromtimestamp(slot["fromDateTime"] / 1000)
+                end_dt = _dt.fromtimestamp(slot["toDateTime"] / 1000)
+                occupied = set(slot.get("occupiedFacilityIds") or [])
+                for fid in slot["facilityIds"]:
+                    if fid in occupied:
+                        continue
+                    if fid not in TENNIS_FACILITIES:
+                        # Unknown facility id — skip rather than guess a name.
+                        continue
+                    out.setdefault((start, end), []).append(AvailableSlot(
+                        facility_id=fid,
+                        facility_name=TENNIS_FACILITIES[fid],
+                        center_id=TENNIS_CTR_ID,
+                        center_name=TENNIS_CENTER_NAME,
+                        start_dt=start_dt,
+                        end_dt=end_dt,
+                    ))
+        return out
