@@ -1,38 +1,66 @@
-"""HTTP-based booking orchestrator.
+"""HTTP-based booking orchestrator (predictive).
 
-Drives a PolyUHttpClient through the 08:30 HKT booking flow:
- 1. Search the target date.
- 2. For each priority (start, end) slot, in rank order:
-    a. Pick a free facility (any) from the search results.
-    b. Call client.try_book(slot).
-    c. SUCCESS → return 0. OCCUPIED → advance to next rank. ERROR → abort.
- 3. If no rank produces SUCCESS, return 1.
+At 08:30:00.000 HKT, PolyU's Search endpoint takes ~4.5s to respond. Other
+users (or their bots) win popular slots inside that window. So we skip
+search entirely: we already know the facility IDs (TENNIS_FACILITIES) and
+target times (SLOT_PRIORITY), so we go straight to make_book.do for each
+(priority, facility) pair in rank order. If the slot is actually free, the
+cell-click + submit succeed. If it's already booked, the cell-click returns
+OCCUPIED and we advance to the next candidate.
 
-Replaces the old parallel_runner.py + single-dequeuer coordinator design.
-With HTTP, attempts are cheap and serial — no need for N concurrent
-sessions racing for the same date.
+Trade-offs vs the old search-then-book flow:
+ - Wins ~4.5s — first make_book.do hits the server at ~08:30:00.050 instead
+   of ~08:30:04.500. That's the difference between getting popular slots
+   and not.
+ - We attempt facility IDs that may not exist on the target date (e.g. if
+   PolyU adds/removes a court). Those return OCCUPIED via the same code
+   path as a truly-occupied slot, so semantics don't change — we just
+   waste one POST per nonexistent facility.
+ - No "no free facility, skipping" log line — every priority gets every
+   facility tried.
+
+Order: priority-major, facility-minor. For SLOT_PRIORITY=[(18:30, 19:30),
+(19:30, 20:30)] and TENNIS_FACILITIES={10, 11}, candidates are:
+  rank 0: 18:30 court 10
+  rank 1: 18:30 court 11
+  rank 2: 19:30 court 10
+  rank 3: 19:30 court 11
+User intent: "I want 18:30, any court, before I'll accept 19:30."
 """
 from __future__ import annotations
 
 import logging
-from datetime import date, time
+from datetime import date, datetime, time
 from typing import Protocol
 
 from src.http_client import AvailableSlot, BookingResult
 
 
 class _ClientLike(Protocol):
-    """Minimal subset of PolyUHttpClient used by the orchestrator.
-
-    Defined as a Protocol so tests can pass a fake client without
-    inheriting from PolyUHttpClient.
-    """
-    async def search(
-        self,
-        target_date: date,
-    ) -> dict[tuple[time, time], list[AvailableSlot]]: ...
-
+    """Minimal subset of PolyUHttpClient used by the orchestrator."""
     async def try_book(self, slot: AvailableSlot) -> BookingResult: ...
+
+
+def _build_candidates(
+    target_date: date,
+    slots: list[tuple[time, time]],
+) -> list[AvailableSlot]:
+    from src.config import TENNIS_CENTER_NAME, TENNIS_CTR_ID, TENNIS_FACILITIES
+
+    candidates: list[AvailableSlot] = []
+    for start, end in slots:
+        start_dt = datetime.combine(target_date, start)
+        end_dt = datetime.combine(target_date, end)
+        for fid, fname in TENNIS_FACILITIES.items():
+            candidates.append(AvailableSlot(
+                facility_id=fid,
+                facility_name=fname,
+                center_id=TENNIS_CTR_ID,
+                center_name=TENNIS_CENTER_NAME,
+                start_dt=start_dt,
+                end_dt=end_dt,
+            ))
+    return candidates
 
 
 async def book_via_http(
@@ -43,17 +71,11 @@ async def book_via_http(
     *,
     log: logging.Logger,
 ) -> int:
-    """Search, then attempt priority slots serially. Returns 0 on SUCCESS, 1 otherwise."""
-    log.info("calling search for %s", target_date)
-    availability = await client.search(target_date)
-    log.info("search returned %d free time-slots", len(availability))
+    """Attempt priority×facility candidates serially. Returns 0 on SUCCESS, 1 otherwise."""
+    candidates = _build_candidates(target_date, slots)
+    log.info("predictive booking: %d candidates queued", len(candidates))
 
-    for rank, (start, end) in enumerate(slots):
-        free = availability.get((start, end), [])
-        if not free:
-            log.info("rank=%d %s-%s: no free facility, skipping", rank, start, end)
-            continue
-        slot = free[0]  # any free facility for this time will do
+    for rank, slot in enumerate(candidates):
         log.info(
             "rank=%d trying %s on %s (facility=%d)",
             rank, slot.facility_name, slot.start_dt, slot.facility_id,
@@ -66,9 +88,9 @@ async def book_via_http(
         if result is BookingResult.SUCCESS:
             return 0
         if result is BookingResult.ERROR:
-            log.error("try_book returned ERROR; aborting to avoid burning priorities on a broken session")
+            log.error("try_book returned ERROR; aborting to avoid burning candidates on a broken session")
             return 1
-        # OCCUPIED → fall through to the next rank.
+        # OCCUPIED → fall through to the next candidate.
 
-    log.warning("no priority slot succeeded; exiting with 1")
+    log.warning("no candidate succeeded; exiting with 1")
     return 1

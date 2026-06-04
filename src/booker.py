@@ -169,7 +169,7 @@ async def run(*, dry_run: bool = False, skip_sleep: bool = False) -> int:
             delay = seconds_until_hkt_time(TRIGGER_TIME_HKT)
             log.info("sleeping %.3fs until HKT %s (trigger)", delay, TRIGGER_TIME_HKT)
             await asyncio.sleep(delay)
-            log.info("woke up at trigger time, calling search")
+            log.info("woke up at trigger time, firing predictive booking")
         return await book_via_http(client, target_date, slots, dry_run, log=log)
     finally:
         if client is not None:

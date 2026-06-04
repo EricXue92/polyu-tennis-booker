@@ -43,12 +43,13 @@ The booking flow spans three files. `src/booker.py:run` does Playwright
 login at 08:29, extracts session state (cookies + CSRFToken + fbUserId)
 via `bootstrap_http_client`, closes the browser, sleeps to 08:30:00.000,
 and hands off to `src/http_booker.py:book_via_http`. That orchestrator
-calls `PolyUHttpClient.search()` (one HTTP POST), then iterates priority
-slots in rank order calling `client.try_book()` serially: SUCCESS wins,
-OCCUPIED advances to the next rank, ERROR aborts. The client
-(`src/http_client.py`) issues all three booking POSTs (timetable.json,
-make_book.do, make_book_submit.do) over raw httpx — no Playwright on
-the hot path.
+**skips search** and iterates `(SLOT_PRIORITY × TENNIS_FACILITIES)`
+candidates in priority-major, facility-minor order, calling
+`client.try_book()` serially: SUCCESS wins, OCCUPIED advances to the
+next candidate, ERROR aborts. The client (`src/http_client.py`) issues
+the booking POSTs (make_book.do, make_book_submit.do) over raw httpx —
+no Playwright, no search on the hot path. (`PolyUHttpClient.search()`
+still exists for diagnostic use but isn't called in production.)
 
 Things that aren't obvious from a single file:
 
@@ -78,9 +79,9 @@ Things that aren't obvious from a single file:
   sleeps again to 08:30:00.000 before calling `book_via_http`. HTTP
   login is much faster than the old Playwright login + dropdown + date
   flow, but we keep the 60s lead as a buffer — running closer than that
-  risks landing the Search POST a few hundred ms after 08:30 if the CI
-  runner is busy. Do not collapse the two sleeps into one — landing
-  Search exactly at 08:30:00.000 is the entire point.
+  risks landing the first make_book.do POST a few hundred ms after 08:30
+  if the CI runner is busy. Do not collapse the two sleeps into one —
+  landing the first cell-click exactly at 08:30:00.000 is the entire point.
 
 - **`skip_sleep` default MUST stay `false` in book.yml.** CF Worker calls
   `workflow_dispatch` with no inputs, so defaults apply. If `skip_sleep`
@@ -118,16 +119,21 @@ Things that aren't obvious from a single file:
   if so, raises `LoginFailed` distinctly so wrong-credentials show up as a
   meaningful failure, not a downstream selector timeout.
 
-- **Race window is search→Submit; failures advance to next rank.**
-  `book_via_http` POSTs the Search at 08:30:00, parses the JSON response
-  to find which (facility, time) pairs are free, then POSTs cell-click +
-  final Submit serially in priority rank order. Race window from Search
-  fire to first Submit hitting PolyU: ~4.5-5.0s (dominated by PolyU's
-  ~4s server-side Search latency, then 2 cheap httpx POSTs). If the
-  first try_book returns OCCUPIED, the orchestrator advances to the
-  next rank within ~400ms. ERROR (auth lost, 5xx, unexpected redirect)
-  aborts the whole run to avoid burning through priorities on a broken
-  session — the watchdog email then has a meaningful failure to surface.
+- **Predictive booking — no search on the hot path.** PolyU's Search
+  endpoint takes ~4.5s server-side, and during 2026-06-04's run all
+  desired slots were stolen inside that window. So `book_via_http`
+  fabricates `AvailableSlot`s from `(SLOT_PRIORITY × TENNIS_FACILITIES)`
+  and goes straight to `make_book.do` for each candidate. First cell-click
+  hits PolyU at ~08:30:00.050 instead of ~08:30:04.500. Candidate order
+  is priority-major, facility-minor: all facilities for rank 0 are tried
+  before advancing to rank 1 (user intent: "I want 18:30, any court,
+  before I'll accept 19:30"). Per-attempt latency is ~400ms (cell-click)
+  + ~400ms (submit on success). OCCUPIED advances to the next candidate;
+  ERROR (auth lost, 5xx, unexpected redirect) aborts the whole run so
+  the watchdog email has a meaningful failure to surface. Candidates for
+  facility IDs that don't exist on the target date return OCCUPIED via
+  the same code path — semantics don't change, we just waste one POST
+  per nonexistent facility.
 
 - **Submit success/failure detection is direct, no timeout.** With
   Playwright we raced `wait_for_url` against `wait_for_selector("Facility
@@ -150,13 +156,13 @@ Things that aren't obvious from a single file:
   longer needs Playwright). CI uploads any `artifacts/` content if
   present, but the booker itself doesn't create files anymore.
 
-- **Dry-run smoke tests are time-dependent.** `--dry-run --skip-sleep`
-  exercises the full HTTP flow (search + try_book serially in rank order),
-  but only if a priority slot is actually free. After 08:30 HKT, popular
-  slots are gone and `book_via_http` exits with code 1 before any booking
-  is placed. To test the full flow end-to-end, dry-run before 08:30 HKT
-  or temporarily widen `SLOT_PRIORITY` to include a known-free off-peak
-  window.
+- **Dry-run stops before the first cell-click.** `--dry-run --skip-sleep`
+  walks login + bootstrap_http_client, then `book_via_http` constructs
+  candidates and returns 0 before calling `try_book` on the first one.
+  It does NOT verify that PolyU still accepts our cell-click POST shape —
+  to live-test that, drop `dry_run`, set `SLOT_PRIORITY` to a known-free
+  off-peak window, and run before 08:30 HKT (the popular slots are gone
+  shortly after).
 
 - **Tests are offline.** All tests in `tests/` use fakes (e.g. `_FakeClient`
   in `test_http_booker.py`) — no network, no Playwright launch. Don't add
