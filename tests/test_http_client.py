@@ -119,6 +119,43 @@ import respx
 from httpx import Response
 
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_warmup_sends_get_to_make_book_and_returns_status():
+    from src.http_client import PolyUHttpClient
+
+    route = respx.get(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+    ).mock(return_value=Response(200, text="<html>book</html>"))
+
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="tok", fb_user_id="432567")
+    try:
+        status = await client.warmup()
+    finally:
+        await client.aclose()
+    assert status == 200
+    assert route.called
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_warmup_returns_negative_one_on_transport_error():
+    # A failed warmup must not raise — booking would still proceed.
+    import httpx
+    from src.http_client import PolyUHttpClient
+
+    respx.get(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+    ).mock(side_effect=httpx.ConnectError("boom"))
+
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="tok", fb_user_id="432567")
+    try:
+        status = await client.warmup()
+    finally:
+        await client.aclose()
+    assert status == -1
+
+
 _FIXTURES = Path(__file__).parent / "fixtures"
 
 

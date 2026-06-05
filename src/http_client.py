@@ -148,6 +148,31 @@ class PolyUHttpClient:
     async def aclose(self) -> None:
         await self._http.aclose()
 
+    async def warmup(self) -> int:
+        """GET make_book.do to establish a hot TLS connection in the pool.
+
+        The booking flow sleeps ~50s between bootstrap and the 08:30 trigger.
+        Servers typically drop idle keepalive connections in 15-30s, so the
+        first POST at 08:30:00.000 pays a full TCP+TLS handshake (~5s observed
+        on 2026-06-05). Calling this ~1-2s before the trigger primes the
+        connection so the real cell-click POST goes out on a warm socket.
+
+        Best-effort: returns the HTTP status code, or -1 on transport error.
+        Never raises — a failed warmup must not prevent the real booking.
+        """
+        from src.config import MAKE_BOOK_URL
+        try:
+            resp = await self._http.get(
+                MAKE_BOOK_URL,
+                headers={
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Referer": _REFERER_MAKE_BOOK,
+                },
+            )
+            return resp.status_code
+        except httpx.HTTPError:
+            return -1
+
     async def search(
         self,
         target_date: "date",

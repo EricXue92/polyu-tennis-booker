@@ -27,6 +27,11 @@ DEFAULT_TIMEOUT_MS = 20_000
 # sit on a fully-loaded search form and only fire Search at 08:30:00.000 sharp.
 # Empirically login + dropdown + date-set takes ~18 seconds; 60s gives slack.
 PRELOGIN_LEAD_SECONDS = 60
+# How early to send a GET against make_book.do to keep the TLS connection hot.
+# Without warmup, the first POST at 08:30:00 pays a full TCP+TLS handshake
+# (5.5s observed on 2026-06-05). 2s gives the warmup GET time to complete
+# (~400-800ms on a cold connection) with margin before 08:30:00.000.
+WARMUP_LEAD_SECONDS = 2
 
 
 class LoginFailed(RuntimeError):
@@ -164,8 +169,20 @@ async def run(*, dry_run: bool = False, skip_sleep: bool = False) -> int:
             finally:
                 await browser.close()
 
-        # Phase 2: sleep until 08:30:00.000, then fire the HTTP booking flow.
+        # Phase 2: warm up the HTTP connection ~2s before trigger, then sleep
+        # the last sliver and fire the booking flow.
         if not skip_sleep:
+            warmup_target = (
+                datetime.combine(date.today(), TRIGGER_TIME_HKT)
+                - timedelta(seconds=WARMUP_LEAD_SECONDS)
+            ).time()
+            delay = seconds_until_hkt_time(warmup_target)
+            log.info("sleeping %.3fs until HKT %s (pre-warmup)", delay, warmup_target)
+            await asyncio.sleep(delay)
+            log.info("warming up HTTP connection")
+            status = await client.warmup()
+            log.info("warmup complete (status=%d)", status)
+
             delay = seconds_until_hkt_time(TRIGGER_TIME_HKT)
             log.info("sleeping %.3fs until HKT %s (trigger)", delay, TRIGGER_TIME_HKT)
             await asyncio.sleep(delay)

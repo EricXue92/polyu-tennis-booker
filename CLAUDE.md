@@ -72,16 +72,20 @@ Things that aren't obvious from a single file:
   would let the booker run before 08:30 HKT (e.g., `skip_sleep=true`,
   removing the `sleep_until_hkt` call, lowering `TRIGGER_TIME_HKT`).
 
-- **Two-phase sleep — login is intentionally BEFORE 08:30.** `run()`
-  sleeps twice: first to `TRIGGER_TIME_HKT - PRELOGIN_LEAD_SECONDS`
-  (08:29:00), runs Playwright `login` (~2-3s) and `bootstrap_http_client`
-  to extract cookies + CSRFToken + fbUserId, closes the browser, then
-  sleeps again to 08:30:00.000 before calling `book_via_http`. HTTP
-  login is much faster than the old Playwright login + dropdown + date
-  flow, but we keep the 60s lead as a buffer — running closer than that
-  risks landing the first make_book.do POST a few hundred ms after 08:30
-  if the CI runner is busy. Do not collapse the two sleeps into one —
-  landing the first cell-click exactly at 08:30:00.000 is the entire point.
+- **Three-phase sleep — login is intentionally BEFORE 08:30, and there's
+  a TLS warmup between the two.** `run()` sleeps to
+  `TRIGGER_TIME_HKT - PRELOGIN_LEAD_SECONDS` (08:29:00), runs Playwright
+  `login` (~2-3s) and `bootstrap_http_client` to extract cookies +
+  CSRFToken + fbUserId, closes the browser, then sleeps to
+  `TRIGGER_TIME_HKT - WARMUP_LEAD_SECONDS` (08:29:58), calls
+  `client.warmup()` (a GET against make_book.do that primes TCP+TLS),
+  then sleeps the last ~1s to 08:30:00.000 before calling
+  `book_via_http`. The warmup exists because servers drop idle keepalive
+  connections within 15-30s — on 2026-06-05 the first cell-click POST
+  paid a 5.5s cold-handshake cost and all four candidates returned
+  OCCUPIED. Do not collapse the sleeps into one and do not skip the
+  warmup — landing the first cell-click on a warm connection at
+  08:30:00.000 is the entire point.
 
 - **`skip_sleep` default MUST stay `false` in book.yml.** CF Worker calls
   `workflow_dispatch` with no inputs, so defaults apply. If `skip_sleep`
