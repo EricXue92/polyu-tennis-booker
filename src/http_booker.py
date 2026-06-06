@@ -87,10 +87,15 @@ async def book_via_http(
         log.info("rank=%d %s: result=%s", rank, slot.facility_name, result.name)
         if result is BookingResult.SUCCESS:
             return 0
-        if result is BookingResult.ERROR:
-            log.error("try_book returned ERROR; aborting to avoid burning candidates on a broken session")
+        if result is BookingResult.ERROR_FATAL:
+            log.error("try_book returned ERROR_FATAL; aborting (session likely dead)")
             return 1
-        # OCCUPIED → fall through to the next candidate.
+        if result is BookingResult.ERROR_TRANSIENT:
+            log.warning(
+                "rank=%d %s: transient error, advancing to next candidate",
+                rank, slot.facility_name,
+            )
+        # OCCUPIED or ERROR_TRANSIENT → fall through to the next candidate.
 
     log.warning("no candidate succeeded; exiting with 1")
     return 1

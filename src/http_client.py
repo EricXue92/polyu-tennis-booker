@@ -13,12 +13,15 @@ plan.
 from __future__ import annotations
 
 import enum
+import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from urllib.parse import quote
 
 import httpx
+
+_LOG = logging.getLogger("booker")
 
 
 @dataclass(frozen=True)
@@ -35,7 +38,17 @@ class AvailableSlot:
 class BookingResult(enum.Enum):
     SUCCESS = enum.auto()
     OCCUPIED = enum.auto()
-    ERROR = enum.auto()
+    # 5xx, network, or timeout — advance to the next candidate (session likely fine).
+    ERROR_TRANSIENT = enum.auto()
+    # Auth lost, 4xx, or unrecognised response shape — abort the run; remaining
+    # candidates would hit the same wall.
+    ERROR_FATAL = enum.auto()
+
+
+def _classify_http_error(status: int) -> "BookingResult":
+    if 500 <= status < 600:
+        return BookingResult.ERROR_TRANSIENT
+    return BookingResult.ERROR_FATAL
 
 
 class HtmlParseError(RuntimeError):
@@ -301,18 +314,25 @@ class PolyUHttpClient:
                     "Upgrade-Insecure-Requests": "1",
                 },
             )
-        except httpx.HTTPError:
-            return BookingResult.ERROR
+        except httpx.HTTPError as exc:
+            _LOG.warning("cell-click transport error: %r", exc)
+            return BookingResult.ERROR_TRANSIENT
 
-        if cell_resp.status_code == 302 and "make_book_submit" in cell_resp.headers.get("location", ""):
+        cell_location = cell_resp.headers.get("location", "")
+        if cell_resp.status_code == 302 and "make_book_submit" in cell_location:
             pass  # cell click accepted — fall through to Submit
         elif cell_resp.status_code in (200, 302) and (
             "Facility is occupied" in (cell_resp.text or "")
-            or "make_book" in cell_resp.headers.get("location", "")
+            or "make_book" in cell_location
         ):
             return BookingResult.OCCUPIED
         else:
-            return BookingResult.ERROR
+            err = _classify_http_error(cell_resp.status_code)
+            _LOG.warning(
+                "cell-click unexpected response (stage=cell, status=%d, location=%r) -> %s",
+                cell_resp.status_code, cell_location, err.name,
+            )
+            return err
 
         submit_fields = {
             "dataSetId": str(TENNIS_DATA_SET_ID),
@@ -364,12 +384,21 @@ class PolyUHttpClient:
                     "Upgrade-Insecure-Requests": "1",
                 },
             )
-        except httpx.HTTPError:
-            return BookingResult.ERROR
+        except httpx.HTTPError as exc:
+            _LOG.warning("submit transport error: %r", exc)
+            return BookingResult.ERROR_TRANSIENT
 
-        location = submit_resp.headers.get("location", "")
-        if submit_resp.status_code == 302 and "make_book_result" in location:
+        submit_location = submit_resp.headers.get("location", "")
+        if submit_resp.status_code == 302 and "make_book_result" in submit_location:
             return BookingResult.SUCCESS
-        if submit_resp.status_code in (200, 302) and ("Facility is occupied" in (submit_resp.text or "") or "make_book_submit" in location):
+        if submit_resp.status_code in (200, 302) and (
+            "Facility is occupied" in (submit_resp.text or "")
+            or "make_book_submit" in submit_location
+        ):
             return BookingResult.OCCUPIED
-        return BookingResult.ERROR
+        err = _classify_http_error(submit_resp.status_code)
+        _LOG.warning(
+            "submit unexpected response (stage=submit, status=%d, location=%r) -> %s",
+            submit_resp.status_code, submit_location, err.name,
+        )
+        return err

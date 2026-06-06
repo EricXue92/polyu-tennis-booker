@@ -80,16 +80,48 @@ async def test_book_via_http_returns_1_when_all_occupied():
 
 
 @pytest.mark.asyncio
-async def test_book_via_http_aborts_on_error():
-    # ERROR means session is broken (auth lost, 500). Don't burn through
-    # remaining candidates — return 1 so the watchdog opens an issue.
+async def test_book_via_http_aborts_on_fatal_error():
+    # ERROR_FATAL means session is dead (4xx, unrecognised response). Don't
+    # burn through remaining candidates — return 1 so the watchdog opens an issue.
     from src.http_booker import book_via_http
 
-    client = _FakeClient(try_book_results=[BookingResult.ERROR])
+    client = _FakeClient(try_book_results=[BookingResult.ERROR_FATAL])
     priority = [(time(18, 30), time(19, 30)), (time(19, 30), time(20, 30))]
     rc = await book_via_http(client, date(2026, 6, 10), priority, dry_run=False, log=_LOG)
     assert rc == 1
     assert len(client.try_book_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_book_via_http_continues_on_transient_error():
+    # ERROR_TRANSIENT (5xx, network) on the first candidate must not block the
+    # rest — 2026-06-06 lost a slot because a single 6.6s ERROR aborted the run
+    # before Court No. 2 was even tried.
+    from src.http_booker import book_via_http
+
+    client = _FakeClient(try_book_results=[
+        BookingResult.ERROR_TRANSIENT,  # rank 0 facility 0 — transient hiccup
+        BookingResult.SUCCESS,           # rank 0 facility 1
+    ])
+    priority = [(time(18, 30), time(19, 30)), (time(19, 30), time(20, 30))]
+    rc = await book_via_http(client, date(2026, 6, 10), priority, dry_run=False, log=_LOG)
+    assert rc == 0
+    assert len(client.try_book_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_book_via_http_returns_1_when_all_transient_errors():
+    # If every candidate hits a transient error we still exit 1 so the
+    # watchdog issue fires — but we tried them all instead of aborting after
+    # the first.
+    from src.http_booker import book_via_http
+
+    priority = [(time(18, 30), time(19, 30)), (time(19, 30), time(20, 30))]
+    n_candidates = len(priority) * len(_FACILITY_IDS)
+    client = _FakeClient(try_book_results=[BookingResult.ERROR_TRANSIENT] * n_candidates)
+    rc = await book_via_http(client, date(2026, 6, 10), priority, dry_run=False, log=_LOG)
+    assert rc == 1
+    assert len(client.try_book_calls) == n_candidates
 
 
 @pytest.mark.asyncio

@@ -70,10 +70,15 @@ def test_available_slot_is_immutable():
         slot.facility_id = 99  # frozen dataclass
 
 
-def test_booking_result_has_three_outcomes():
+def test_booking_result_has_four_outcomes():
     from src.http_client import BookingResult
-    assert {BookingResult.SUCCESS, BookingResult.OCCUPIED, BookingResult.ERROR}
-    assert len(list(BookingResult)) == 3
+    assert {
+        BookingResult.SUCCESS,
+        BookingResult.OCCUPIED,
+        BookingResult.ERROR_TRANSIENT,
+        BookingResult.ERROR_FATAL,
+    }
+    assert len(list(BookingResult)) == 4
 
 
 import pytest
@@ -330,7 +335,8 @@ async def test_try_book_occupied_when_cell_click_rejected():
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_try_book_error_on_network_failure():
+async def test_try_book_transient_error_on_network_failure():
+    # Network errors are transient — the next candidate may still work.
     from src.http_client import PolyUHttpClient, BookingResult
     import httpx
 
@@ -343,7 +349,7 @@ async def test_try_book_error_on_network_failure():
         result = await client.try_book(_slot_11_at_1230())
     finally:
         await client.aclose()
-    assert result is BookingResult.ERROR
+    assert result is BookingResult.ERROR_TRANSIENT
 
 
 @pytest.mark.asyncio
@@ -403,10 +409,10 @@ async def test_try_book_sends_correct_cell_click_body():
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_try_book_error_on_unexpected_cell_click_status():
-    # If cell-click returns 500 (server error) or 401 (auth lost), we must
-    # surface ERROR — not OCCUPIED — so the orchestrator can stop instead
-    # of burning through all priorities.
+async def test_try_book_transient_error_on_5xx_cell_click():
+    # 5xx at slot-open is usually PolyU's app server briefly overloaded by the
+    # 08:30 thundering herd. The session is still valid, so advance to the
+    # next candidate rather than aborting.
     from src.http_client import PolyUHttpClient, BookingResult
 
     respx.post(
@@ -418,7 +424,60 @@ async def test_try_book_error_on_unexpected_cell_click_status():
         result = await client.try_book(_slot_11_at_1230())
     finally:
         await client.aclose()
-    assert result is BookingResult.ERROR
+    assert result is BookingResult.ERROR_TRANSIENT
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_try_book_fatal_error_on_unexpected_4xx_cell_click():
+    # 4xx (e.g. 401/403/404) means our session or request shape is wrong —
+    # other candidates won't fare better. Abort.
+    from src.http_client import PolyUHttpClient, BookingResult
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+    ).mock(return_value=Response(403, text="Forbidden"))
+
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="tok", fb_user_id="432567")
+    try:
+        result = await client.try_book(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert result is BookingResult.ERROR_FATAL
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_try_book_transient_error_on_5xx_submit():
+    # Cell-click ok, but Submit hits a 5xx — still transient.
+    from src.http_client import PolyUHttpClient, BookingResult
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+    ).mock(return_value=Response(
+        302,
+        headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"},
+    ))
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+    ).mock(return_value=Response(502, text="Bad Gateway"))
+
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="tok", fb_user_id="432567")
+    try:
+        result = await client.try_book(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert result is BookingResult.ERROR_TRANSIENT
+
+
+def test_classify_http_error_splits_on_status():
+    from src.http_client import _classify_http_error, BookingResult
+    assert _classify_http_error(500) is BookingResult.ERROR_TRANSIENT
+    assert _classify_http_error(502) is BookingResult.ERROR_TRANSIENT
+    assert _classify_http_error(599) is BookingResult.ERROR_TRANSIENT
+    assert _classify_http_error(403) is BookingResult.ERROR_FATAL
+    assert _classify_http_error(404) is BookingResult.ERROR_FATAL
+    assert _classify_http_error(200) is BookingResult.ERROR_FATAL
 
 
 def test_fmt_polyu_dt_is_locale_independent():

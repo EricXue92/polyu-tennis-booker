@@ -132,9 +132,15 @@ Things that aren't obvious from a single file:
   is priority-major, facility-minor: all facilities for rank 0 are tried
   before advancing to rank 1 (user intent: "I want 18:30, any court,
   before I'll accept 19:30"). Per-attempt latency is ~400ms (cell-click)
-  + ~400ms (submit on success). OCCUPIED advances to the next candidate;
-  ERROR (auth lost, 5xx, unexpected redirect) aborts the whole run so
-  the watchdog email has a meaningful failure to surface. Candidates for
+  + ~400ms (submit on success). OCCUPIED and ERROR_TRANSIENT (5xx,
+  network/timeout — session presumed alive) advance to the next
+  candidate; ERROR_FATAL (4xx, unrecognised response shape — session
+  presumed dead) aborts the whole run so the watchdog email has a
+  meaningful failure to surface. `try_book` logs the status code +
+  Location header on every ERROR_* so failures are diagnosable from CI
+  logs alone. The 2026-06-06 run lost a slot because a single 6.6s
+  ERROR aborted before Court No. 2 was even tried — the transient/fatal
+  split exists to avoid that. Candidates for
   facility IDs that don't exist on the target date return OCCUPIED via
   the same code path — semantics don't change, we just waste one POST
   per nonexistent facility.
