@@ -86,5 +86,4 @@ class Selectors:
     login_password: str | _Pending = 'input[name="j_password"]'
     login_submit: str | _Pending = 'button[type="submit"][name="buttonAction"]'
 
-
 SELECTORS = Selectors()
