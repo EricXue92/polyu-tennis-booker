@@ -745,3 +745,23 @@ async def test_cell_click_logs_diagnostics_on_error_fatal(caplog):
     assert "body_len=" in msg
     assert "preview=" in msg
     assert "markers=" in msg
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_cell_click_accepted_wins_over_occupied_body_on_submit_redirect():
+    # ACCEPTED takes priority even if body contains "occupied" — branch order matters.
+    from src.http_client import PolyUHttpClient, CellOutcome
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+    ).mock(return_value=Response(
+        302,
+        headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"},
+        text="<html>occupied notice</html>",
+    ))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        cr = await client.cell_click(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert cr.outcome is CellOutcome.ACCEPTED
