@@ -830,7 +830,7 @@ async def test_submit_returns_occupied_on_redirect_back_to_submit():
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_submit_returns_occupied_on_lowercase_body():
+async def test_submit_returns_occupied_on_body_case_insensitive():
     from src.http_client import PolyUHttpClient, BookingResult
 
     respx.post(
@@ -900,6 +900,22 @@ async def test_submit_returns_fatal_on_unknown_shape_with_diagnostics(caplog):
     assert "body_len=" in msg
     assert "preview=" in msg
     assert "markers=" in msg
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_submit_returns_transient_on_network_error():
+    import httpx
+    from src.http_client import PolyUHttpClient, BookingResult
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+    ).mock(side_effect=httpx.ConnectError("boom"))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        result = await client.submit(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert result is BookingResult.ERROR_TRANSIENT
 
 
 @pytest.mark.asyncio
