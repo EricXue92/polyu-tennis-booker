@@ -964,6 +964,20 @@ async def test_warmup_returns_negative_one_per_failed_get():
 
 
 @pytest.mark.asyncio
+async def test_client_sets_connection_pool_limits():
+    from src.http_client import PolyUHttpClient
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        # httpx.Limits is stored on the transport pool; access via the private
+        # _pool attribute. Brittle vs httpx internals but worth the lock-in.
+        pool = client._http._transport._pool
+        assert pool._max_connections == 8
+        assert pool._max_keepalive_connections == 8
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
 @respx.mock
 async def test_warmup_n_fires_concurrently_not_serially():
     import asyncio, time

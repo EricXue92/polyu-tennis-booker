@@ -192,6 +192,10 @@ class PolyUHttpClient:
             headers=_DEFAULT_HEADERS,
             timeout=timeout,
             follow_redirects=False,  # We need to inspect 302 Location ourselves.
+            limits=httpx.Limits(
+                max_connections=8,
+                max_keepalive_connections=8,
+            ),
         )
 
     async def aclose(self) -> None:
