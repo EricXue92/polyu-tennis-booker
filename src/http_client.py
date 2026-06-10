@@ -291,6 +291,104 @@ class PolyUHttpClient:
                     ))
         return out
 
+    async def cell_click(self, slot: AvailableSlot) -> CellClickResult:
+        """POST make_book.do for one (facility, time) candidate.
+
+        Returns CellClickResult with one of:
+          ACCEPTED        - 302 -> make_book_submit.do; slot is server-side held,
+                            caller can call submit() to commit.
+          OCCUPIED        - 200/302 with "occupied" body OR Location bouncing back
+                            to make_book*; slot was taken between our search and
+                            this POST.
+          ERROR_TRANSIENT - 5xx, network/timeout; safe to advance to the next
+                            candidate, our session is probably still alive.
+          ERROR_FATAL     - 4xx or unrecognised shape; this candidate is unbookable
+                            (auth, schema, or quota).
+
+        On ERROR_*, logs body diagnostics so 2026-06-09-style anomalies are
+        root-causeable from CI logs alone.
+        """
+        from src.config import (
+            MAKE_BOOK_URL,
+            TENNIS_ACTV_ID,
+            TENNIS_DATA_SET_ID,
+        )
+        import time as _time
+        date_str = slot.start_dt.strftime("%d/%m/%Y")
+        inner_date = quote(date_str, safe="")
+        search_form_str = (
+            f"fbUserId={self.fb_user_id}&bookType=INDV"
+            f"&dataSetId={TENNIS_DATA_SET_ID}&actvId={TENNIS_ACTV_ID}"
+            f"&searchDate={inner_date}&ctrId={slot.center_id}&facilityId="
+        )
+        cell_form = {
+            "brcdNo": "",
+            "phone": "",
+            "extlPtyDclrId": "",
+            "dataSetId": str(TENNIS_DATA_SET_ID),
+            "actvId": str(TENNIS_ACTV_ID),
+            "onBehalfOfFbUserId": "",
+            "byPassQuota": "false",
+            "byPassChrgSchm": "false",
+            "byPassBookingDaysLimit": "false",
+            "repeatOccurrence": "false",
+            "grpFacilityIds": "",
+            "searchFormString": search_form_str,
+            "boMakeBookFacilities[0].ctrId": str(slot.center_id),
+            "boMakeBookFacilities[0].facilityId": str(slot.facility_id),
+            "boMakeBookFacilities[0].startDateTime": _fmt_polyu_dt(slot.start_dt),
+            "boMakeBookFacilities[0].endDateTime": _fmt_polyu_dt(slot.end_dt),
+            "CSRFToken": self.csrf_token,
+        }
+
+        t0 = _time.perf_counter()
+        try:
+            resp = await self._http.post(
+                MAKE_BOOK_URL,
+                data=cell_form,
+                headers={
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Origin": _ORIGIN,
+                    "Referer": _REFERER_MAKE_BOOK,
+                    "Upgrade-Insecure-Requests": "1",
+                },
+            )
+        except httpx.HTTPError as exc:
+            _LOG.warning("cell_click transport error: %r", exc)
+            return CellClickResult(
+                slot=slot,
+                outcome=CellOutcome.ERROR_TRANSIENT,
+                latency_ms=int((_time.perf_counter() - t0) * 1000),
+            )
+
+        latency_ms = int((_time.perf_counter() - t0) * 1000)
+        location = resp.headers.get("location", "")
+        body = resp.text or ""
+
+        if resp.status_code == 302 and "make_book_submit" in location:
+            outcome = CellOutcome.ACCEPTED
+        elif resp.status_code in (200, 302) and (
+            "occupied" in body.lower() or "make_book" in location
+        ):
+            outcome = CellOutcome.OCCUPIED
+        else:
+            outcome = _classify_http_error(resp.status_code)  # ERROR_TRANSIENT or ERROR_FATAL
+            # _classify_http_error returns BookingResult.ERROR_*; translate.
+            outcome = (
+                CellOutcome.ERROR_TRANSIENT
+                if outcome is BookingResult.ERROR_TRANSIENT
+                else CellOutcome.ERROR_FATAL
+            )
+            _LOG.warning(
+                "cell_click unexpected (status=%d, location=%r, body_len=%d, "
+                "preview=%r, markers=%s) -> %s",
+                resp.status_code, location, len(body),
+                " ".join(body[:300].split()),
+                _diag_markers(body),
+                outcome.name,
+            )
+        return CellClickResult(slot=slot, outcome=outcome, latency_ms=latency_ms)
+
     async def try_book(self, slot: AvailableSlot) -> BookingResult:
         """Attempt to book a specific (facility, time-range) slot.
 

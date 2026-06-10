@@ -610,3 +610,138 @@ def test_diag_markers_extracts_known_substrings_case_insensitive():
 def test_diag_markers_returns_empty_when_no_match():
     from src.http_client import _diag_markers
     assert _diag_markers("plain text with no signals") == []
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_cell_click_returns_accepted_on_redirect_to_submit():
+    from src.http_client import PolyUHttpClient, CellOutcome
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+    ).mock(return_value=Response(
+        302,
+        headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"},
+    ))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        cr = await client.cell_click(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert cr.outcome is CellOutcome.ACCEPTED
+    assert cr.slot.facility_id == 11
+    assert cr.latency_ms >= 0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_cell_click_returns_occupied_on_redirect_back_to_make_book():
+    # Slot grabbed by another user - PolyU bounces us back to the listing.
+    from src.http_client import PolyUHttpClient, CellOutcome
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+    ).mock(return_value=Response(
+        302,
+        headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"},
+    ))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        cr = await client.cell_click(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert cr.outcome is CellOutcome.OCCUPIED
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_cell_click_returns_occupied_on_lowercase_occupied_body():
+    # A.1 consistency: case-insensitive substring, broader than the literal
+    # "Facility is occupied" string we previously matched.
+    from src.http_client import PolyUHttpClient, CellOutcome
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+    ).mock(return_value=Response(
+        200, text="<html><body>this slot is OCCUPIED already</body></html>",
+    ))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        cr = await client.cell_click(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert cr.outcome is CellOutcome.OCCUPIED
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_cell_click_returns_transient_on_5xx():
+    from src.http_client import PolyUHttpClient, CellOutcome
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+    ).mock(return_value=Response(503, text="Service Unavailable"))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        cr = await client.cell_click(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert cr.outcome is CellOutcome.ERROR_TRANSIENT
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_cell_click_returns_fatal_on_4xx():
+    from src.http_client import PolyUHttpClient, CellOutcome
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+    ).mock(return_value=Response(403, text="Forbidden"))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        cr = await client.cell_click(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert cr.outcome is CellOutcome.ERROR_FATAL
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_cell_click_returns_transient_on_network_error():
+    import httpx
+    from src.http_client import PolyUHttpClient, CellOutcome
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+    ).mock(side_effect=httpx.ConnectError("boom"))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        cr = await client.cell_click(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert cr.outcome is CellOutcome.ERROR_TRANSIENT
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_cell_click_logs_diagnostics_on_error_fatal(caplog):
+    # Unknown shape (200 + empty Location + no marker words) -> FATAL + diag log.
+    from src.http_client import PolyUHttpClient, CellOutcome
+    import logging
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+    ).mock(return_value=Response(200, text="<html>nothing recognisable</html>"))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        with caplog.at_level(logging.WARNING, logger="booker"):
+            cr = await client.cell_click(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert cr.outcome is CellOutcome.ERROR_FATAL
+    rec = [r for r in caplog.records if "cell_click unexpected" in r.message]
+    assert rec, "expected a cell_click unexpected WARNING with diagnostics"
+    msg = rec[0].message
+    assert "body_len=" in msg
+    assert "preview=" in msg
+    assert "markers=" in msg
