@@ -45,6 +45,42 @@ class BookingResult(enum.Enum):
     ERROR_FATAL = enum.auto()
 
 
+class CellOutcome(enum.Enum):
+    """Result of the cell-click POST (first stage of try_book)."""
+    ACCEPTED = enum.auto()         # 302 -> make_book_submit.do; slot held server-side
+    OCCUPIED = enum.auto()         # slot already taken
+    ERROR_TRANSIENT = enum.auto()  # 5xx / network — session probably alive
+    ERROR_FATAL = enum.auto()      # 4xx / unknown shape — this candidate unbookable
+
+
+@dataclass(frozen=True)
+class CellClickResult:
+    """What cell_click returns. The orchestrator uses `outcome` to decide
+    whether to call submit, and logs `latency_ms` for diagnostics."""
+    slot: "AvailableSlot"
+    outcome: CellOutcome
+    latency_ms: int
+
+
+_DIAG_MARKERS = (
+    "occupied", "quota", "exceeded", "logout", "expired",
+    "successfully", "session", "denied", "invalid", "error",
+)
+
+
+def _diag_markers(body: str | None) -> list[str]:
+    """Return which `_DIAG_MARKERS` substrings appear in body (case-insensitive).
+
+    Used when an unexpected response shape falls through to ERROR_*; the marker
+    list gets logged so we can root-cause from CI logs without reproducing the
+    failure live (e.g. 2026-06-09's 200+empty-Location response).
+    """
+    if not body:
+        return []
+    low = body.lower()
+    return [m for m in _DIAG_MARKERS if m in low]
+
+
 def _classify_http_error(status: int) -> "BookingResult":
     if 500 <= status < 600:
         return BookingResult.ERROR_TRANSIENT

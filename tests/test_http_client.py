@@ -566,3 +566,48 @@ async def test_try_book_sends_origin_and_correct_referers():
     assert captured["submit_headers"].get("origin") == "https://www40.polyu.edu.hk"
     assert "make_book_submit.do" in captured["submit_headers"].get("referer", "")
     assert captured["submit_headers"].get("upgrade-insecure-requests") == "1"
+
+
+def test_cell_outcome_has_four_outcomes():
+    from src.http_client import CellOutcome
+    assert {
+        CellOutcome.ACCEPTED,
+        CellOutcome.OCCUPIED,
+        CellOutcome.ERROR_TRANSIENT,
+        CellOutcome.ERROR_FATAL,
+    }
+    assert len(list(CellOutcome)) == 4
+
+
+def test_cell_click_result_is_immutable():
+    from src.http_client import AvailableSlot, CellClickResult, CellOutcome
+    slot = AvailableSlot(
+        facility_id=10, facility_name="X", center_id=1, center_name="Y",
+        start_dt=datetime(2026, 6, 10, 18, 30),
+        end_dt=datetime(2026, 6, 10, 19, 30),
+    )
+    cr = CellClickResult(slot=slot, outcome=CellOutcome.ACCEPTED, latency_ms=42)
+    import pytest
+    with pytest.raises(Exception):
+        cr.latency_ms = 99
+
+
+def test_diag_markers_returns_empty_for_empty_body():
+    from src.http_client import _diag_markers
+    assert _diag_markers("") == []
+    assert _diag_markers(None) == []
+
+
+def test_diag_markers_extracts_known_substrings_case_insensitive():
+    from src.http_client import _diag_markers
+    body = "Your Quota was EXCEEDED. Session Expired. Please re-login."
+    found = _diag_markers(body)
+    assert "quota" in found
+    assert "exceeded" in found
+    assert "session" in found
+    assert "expired" in found
+
+
+def test_diag_markers_returns_empty_when_no_match():
+    from src.http_client import _diag_markers
+    assert _diag_markers("plain text with no signals") == []
