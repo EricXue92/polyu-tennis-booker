@@ -961,3 +961,30 @@ async def test_warmup_returns_negative_one_per_failed_get():
     finally:
         await client.aclose()
     assert results == [-1, -1, -1, -1]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_warmup_n_fires_concurrently_not_serially():
+    import asyncio, time
+    from src.http_client import PolyUHttpClient
+
+    async def _slow_mock(request, *args, **kwargs):
+        await asyncio.sleep(0.1)
+        return Response(200, text="ok")
+
+    respx.get(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+    ).mock(side_effect=_slow_mock)
+
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        t0 = time.monotonic()
+        results = await client.warmup(n=4)
+        elapsed = time.monotonic() - t0
+    finally:
+        await client.aclose()
+
+    assert results == [200, 200, 200, 200]
+    # If sequential: ~0.4s. If concurrent: ~0.1s. 0.25s threshold absorbs CI jitter.
+    assert elapsed < 0.25, f"warmup ran sequentially (took {elapsed:.2f}s)"
