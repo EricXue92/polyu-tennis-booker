@@ -389,6 +389,104 @@ class PolyUHttpClient:
             )
         return CellClickResult(slot=slot, outcome=outcome, latency_ms=latency_ms)
 
+    async def submit(self, slot: AvailableSlot) -> BookingResult:
+        """POST make_book_submit.do to commit a slot whose cell_click was ACCEPTED.
+
+        Returns:
+          SUCCESS         - 302 -> make_book_result.do. Booking confirmed.
+          OCCUPIED        - 302 back to make_book* OR body contains 'occupied'.
+                            Slot was grabbed between our cell_click and this POST,
+                            or PolyU's quota check rejected us.
+          ERROR_TRANSIENT - 5xx, network/timeout.
+          ERROR_FATAL     - 4xx or unrecognised shape; orchestrator should stop
+                            trying further submits (auth is presumed dead).
+
+        A.1 fix: OCCUPIED detection now matches 'make_book' broadly (covering
+        both make_book.do and make_book_submit.do redirect targets) and uses a
+        case-insensitive 'occupied' substring for body content. The previous
+        narrow detector misclassified 2026-06-07's response as ERROR_FATAL.
+        """
+        from src.config import (
+            MAKE_BOOK_SUBMIT_URL,
+            TENNIS_ACTV_ID,
+            TENNIS_DATA_SET_ID,
+        )
+        date_str = slot.start_dt.strftime("%d/%m/%Y")
+        inner_date = quote(date_str, safe="")
+        search_form_str = (
+            f"fbUserId={self.fb_user_id}&bookType=INDV"
+            f"&dataSetId={TENNIS_DATA_SET_ID}&actvId={TENNIS_ACTV_ID}"
+            f"&searchDate={inner_date}&ctrId={slot.center_id}&facilityId="
+        )
+        submit_fields = {
+            "dataSetId": str(TENNIS_DATA_SET_ID),
+            "boBookingType.id": "1",
+            "boBookingType.value": "INDV",
+            "boBookingMode.value": "SPORT",
+            "boBookingMode.id": "1",
+            "userRefNum": "",
+            "fbUserId": self.fb_user_id,
+            "grpFacilityIds": "",
+            "repeatOccurrence": "false",
+            "startDate": "",
+            "startTime": "",
+            "endDate": "",
+            "endTime": "",
+            "dayOfWeeks": "",
+            "functionsAvailable": "false",
+            "brcdNo": "",
+            "phone": "",
+            "onBehalfOfFbUserId": "",
+            "byPassQuota": "false",
+            "byPassChrgSchm": "false",
+            "byPassBookingDaysLimit": "false",
+            "searchFormString": search_form_str,
+            "extlPtyDclrId": "",
+            "boMakeBookFacilities[0].ctrId": str(slot.center_id),
+            "boMakeBookFacilities[0].centerName": slot.center_name,
+            "boMakeBookFacilities[0].facilityId": str(slot.facility_id),
+            "boMakeBookFacilities[0].facilityName": slot.facility_name,
+            "boMakeBookFacilities[0].startDateTime": _fmt_polyu_dt(slot.start_dt),
+            "boMakeBookFacilities[0].endDateTime": _fmt_polyu_dt(slot.end_dt),
+            "declare": "on",
+            "CSRFToken": self.csrf_token,
+        }
+        multipart_files = {name: (None, value) for name, value in submit_fields.items()}
+        try:
+            resp = await self._http.post(
+                MAKE_BOOK_SUBMIT_URL,
+                files=multipart_files,
+                headers={
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Origin": _ORIGIN,
+                    "Referer": _REFERER_MAKE_BOOK_SUBMIT,
+                    "Upgrade-Insecure-Requests": "1",
+                },
+            )
+        except httpx.HTTPError as exc:
+            _LOG.warning("submit transport error: %r", exc)
+            return BookingResult.ERROR_TRANSIENT
+
+        location = resp.headers.get("location", "")
+        body = resp.text or ""
+
+        if resp.status_code == 302 and "make_book_result" in location:
+            return BookingResult.SUCCESS
+        if resp.status_code in (200, 302) and (
+            "occupied" in body.lower() or "make_book" in location
+        ):
+            return BookingResult.OCCUPIED
+        err = _classify_http_error(resp.status_code)
+        _LOG.warning(
+            "submit unexpected (status=%d, location=%r, body_len=%d, "
+            "preview=%r, markers=%s) -> %s",
+            resp.status_code, location, len(body),
+            " ".join(body[:300].split()),
+            _diag_markers(body),
+            err.name,
+        )
+        return err
+
     async def try_book(self, slot: AvailableSlot) -> BookingResult:
         """Attempt to book a specific (facility, time-range) slot.
 

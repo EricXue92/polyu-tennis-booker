@@ -765,3 +765,164 @@ async def test_cell_click_accepted_wins_over_occupied_body_on_submit_redirect():
     finally:
         await client.aclose()
     assert cr.outcome is CellOutcome.ACCEPTED
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_submit_returns_success_on_make_book_result_redirect():
+    from src.http_client import PolyUHttpClient, BookingResult
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+    ).mock(return_value=Response(
+        302,
+        headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_result.do"},
+    ))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        result = await client.submit(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert result is BookingResult.SUCCESS
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_submit_returns_occupied_on_redirect_to_make_book_do():
+    # Regression for 2026-06-07: submit returned 302 -> make_book.do (NOT
+    # _submit). Old code mis-classified as ERROR_FATAL; new code treats it
+    # as OCCUPIED so the orchestrator advances to the next candidate.
+    from src.http_client import PolyUHttpClient, BookingResult
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+    ).mock(return_value=Response(
+        302,
+        headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"},
+    ))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        result = await client.submit(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert result is BookingResult.OCCUPIED
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_submit_returns_occupied_on_redirect_back_to_submit():
+    # Existing behaviour preserved.
+    from src.http_client import PolyUHttpClient, BookingResult
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+    ).mock(return_value=Response(
+        302,
+        headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"},
+    ))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        result = await client.submit(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert result is BookingResult.OCCUPIED
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_submit_returns_occupied_on_lowercase_body():
+    from src.http_client import PolyUHttpClient, BookingResult
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+    ).mock(return_value=Response(200, text="<html>OCCUPIED!!!</html>"))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        result = await client.submit(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert result is BookingResult.OCCUPIED
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_submit_returns_transient_on_5xx():
+    from src.http_client import PolyUHttpClient, BookingResult
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+    ).mock(return_value=Response(503, text="Service Unavailable"))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        result = await client.submit(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert result is BookingResult.ERROR_TRANSIENT
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_submit_returns_fatal_on_4xx():
+    from src.http_client import PolyUHttpClient, BookingResult
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+    ).mock(return_value=Response(403, text="Forbidden"))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        result = await client.submit(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert result is BookingResult.ERROR_FATAL
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_submit_returns_fatal_on_unknown_shape_with_diagnostics(caplog):
+    # Regression for 2026-06-09: 200 + empty Location + body without known
+    # marker words. Stays FATAL, but now logs body_len/preview/markers.
+    from src.http_client import PolyUHttpClient, BookingResult
+    import logging
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+    ).mock(return_value=Response(200, text="<html>weird page no banner</html>"))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        with caplog.at_level(logging.WARNING, logger="booker"):
+            result = await client.submit(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert result is BookingResult.ERROR_FATAL
+    rec = [r for r in caplog.records if "submit unexpected" in r.message]
+    assert rec, "expected a submit unexpected WARNING with diagnostics"
+    msg = rec[0].message
+    assert "body_len=" in msg
+    assert "preview=" in msg
+    assert "markers=" in msg
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_submit_sends_multipart_with_csrf_and_declare():
+    from src.http_client import PolyUHttpClient
+
+    captured = {}
+    def record(request):
+        captured["body"] = request.content.decode("utf-8", errors="replace")
+        captured["ct"] = request.headers.get("content-type", "")
+        return Response(302, headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_result.do"})
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+    ).mock(side_effect=record)
+
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="tok-S", fb_user_id="432567")
+    try:
+        await client.submit(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert "multipart/form-data" in captured["ct"]
+    assert "tok-S" in captured["body"]
+    assert 'name="declare"' in captured["body"]
+    assert 'name="CSRFToken"' in captured["body"]
