@@ -570,13 +570,12 @@ async def test_try_book_sends_origin_and_correct_referers():
 
 def test_cell_outcome_has_four_outcomes():
     from src.http_client import CellOutcome
-    assert {
+    assert set(CellOutcome) == {
         CellOutcome.ACCEPTED,
         CellOutcome.OCCUPIED,
         CellOutcome.ERROR_TRANSIENT,
         CellOutcome.ERROR_FATAL,
     }
-    assert len(list(CellOutcome)) == 4
 
 
 def test_cell_click_result_is_immutable():
