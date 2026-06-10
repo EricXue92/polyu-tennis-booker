@@ -197,30 +197,40 @@ class PolyUHttpClient:
     async def aclose(self) -> None:
         await self._http.aclose()
 
-    async def warmup(self) -> int:
-        """GET make_book.do to establish a hot TLS connection in the pool.
+    async def warmup(self, n: int = 1) -> list[int]:
+        """Open n warm TLS connections in the pool by firing n concurrent GETs.
 
         The booking flow sleeps ~50s between bootstrap and the 08:30 trigger.
         Servers typically drop idle keepalive connections in 15-30s, so the
         first POST at 08:30:00.000 pays a full TCP+TLS handshake (~5s observed
-        on 2026-06-05). Calling this ~1-2s before the trigger primes the
-        connection so the real cell-click POST goes out on a warm socket.
+        on 2026-06-05). With N concurrent POSTs (one per candidate), we need N
+        warm connections in the pool — a single warm connection means only the
+        first POST is fast, others cold-handshake.
 
-        Best-effort: returns the HTTP status code, or -1 on transport error.
-        Never raises — a failed warmup must not prevent the real booking.
+        Each httpx GET that overlaps in time forces a new connection because
+        none has yet returned to the pool. After all return, the pool holds n
+        hot keepalive sockets. The subsequent POST burst reuses them all.
+
+        Best-effort: each entry in the returned list is an HTTP status code,
+        or -1 on transport error. Never raises — a failed warmup must not
+        prevent the real booking.
         """
         from src.config import MAKE_BOOK_URL
-        try:
-            resp = await self._http.get(
-                MAKE_BOOK_URL,
-                headers={
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Referer": _REFERER_MAKE_BOOK,
-                },
-            )
-            return resp.status_code
-        except httpx.HTTPError:
-            return -1
+        import asyncio
+
+        async def _one() -> int:
+            try:
+                resp = await self._http.get(
+                    MAKE_BOOK_URL,
+                    headers={
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Referer": _REFERER_MAKE_BOOK,
+                    },
+                )
+                return resp.status_code
+            except httpx.HTTPError:
+                return -1
+        return await asyncio.gather(*(_one() for _ in range(n)))
 
     async def search(
         self,

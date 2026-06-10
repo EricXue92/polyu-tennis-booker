@@ -124,42 +124,6 @@ import respx
 from httpx import Response
 
 
-@pytest.mark.asyncio
-@respx.mock
-async def test_warmup_sends_get_to_make_book_and_returns_status():
-    from src.http_client import PolyUHttpClient
-
-    route = respx.get(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
-    ).mock(return_value=Response(200, text="<html>book</html>"))
-
-    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="tok", fb_user_id="432567")
-    try:
-        status = await client.warmup()
-    finally:
-        await client.aclose()
-    assert status == 200
-    assert route.called
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_warmup_returns_negative_one_on_transport_error():
-    # A failed warmup must not raise — booking would still proceed.
-    import httpx
-    from src.http_client import PolyUHttpClient
-
-    respx.get(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
-    ).mock(side_effect=httpx.ConnectError("boom"))
-
-    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="tok", fb_user_id="432567")
-    try:
-        status = await client.warmup()
-    finally:
-        await client.aclose()
-    assert status == -1
-
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -942,3 +906,58 @@ async def test_submit_sends_multipart_with_csrf_and_declare():
     assert "tok-S" in captured["body"]
     assert 'name="declare"' in captured["body"]
     assert 'name="CSRFToken"' in captured["body"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_warmup_fires_n_concurrent_gets():
+    from src.http_client import PolyUHttpClient
+
+    route = respx.get(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+    ).mock(return_value=Response(200, text="<html>ok</html>"))
+
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        results = await client.warmup(n=4)
+    finally:
+        await client.aclose()
+    assert results == [200, 200, 200, 200]
+    assert route.call_count == 4
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_warmup_default_n_is_1():
+    # Back-compat: warmup() with no arg returns a list of length 1.
+    from src.http_client import PolyUHttpClient
+
+    route = respx.get(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+    ).mock(return_value=Response(200, text="<html>ok</html>"))
+
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        results = await client.warmup()
+    finally:
+        await client.aclose()
+    assert results == [200]
+    assert route.call_count == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_warmup_returns_negative_one_per_failed_get():
+    import httpx
+    from src.http_client import PolyUHttpClient
+
+    respx.get(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+    ).mock(side_effect=httpx.ConnectError("boom"))
+
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        results = await client.warmup(n=4)
+    finally:
+        await client.aclose()
+    assert results == [-1, -1, -1, -1]
