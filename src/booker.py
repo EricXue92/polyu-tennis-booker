@@ -179,9 +179,11 @@ async def run(*, dry_run: bool = False, skip_sleep: bool = False) -> int:
             delay = seconds_until_hkt_time(warmup_target)
             log.info("sleeping %.3fs until HKT %s (pre-warmup)", delay, warmup_target)
             await asyncio.sleep(delay)
-            log.info("warming up HTTP connection")
-            status = await client.warmup()
-            log.info("warmup complete (status=%d)", status)
+            from src.config import TENNIS_FACILITIES
+            n_candidates = len(slots) * len(TENNIS_FACILITIES)
+            log.info("warming up %d HTTP connections", n_candidates)
+            statuses = await client.warmup(n=n_candidates)
+            log.info("warmup complete (statuses=%s)", statuses)
 
             delay = seconds_until_hkt_time(TRIGGER_TIME_HKT)
             log.info("sleeping %.3fs until HKT %s (trigger)", delay, TRIGGER_TIME_HKT)
