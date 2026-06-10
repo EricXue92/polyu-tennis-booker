@@ -14,7 +14,7 @@ morning at 08:30 HKT. Runs as a GitHub Actions cron job (entrypoint
 uv sync                                   # install deps (Python 3.12+, Playwright)
 uv run playwright install chromium        # one-time browser install
 uv run pytest                             # run all unit tests (offline, no network/browser)
-uv run pytest tests/test_http_booker.py::test_book_via_http_returns_0_on_first_success
+uv run pytest tests/test_http_booker.py::test_happy_path_rank0_wins
 uv run book-tennis --dry-run --skip-sleep # local end-to-end (needs POLYU_USERNAME/POLYU_PASSWORD)
 ```
 
