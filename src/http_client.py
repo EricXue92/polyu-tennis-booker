@@ -46,7 +46,7 @@ class BookingResult(enum.Enum):
 
 
 class CellOutcome(enum.Enum):
-    """Result of the cell-click POST (first stage of try_book)."""
+    """Result of the cell-click POST (first stage of the two-phase booking)."""
     ACCEPTED = enum.auto()         # 302 -> make_book_submit.do; slot held server-side
     OCCUPIED = enum.auto()         # slot already taken
     ERROR_TRANSIENT = enum.auto()  # 5xx / network — session probably alive
@@ -137,8 +137,8 @@ _CHROME_UA = (
     "Chrome/147.0.0.0 Safari/537.36"
 )
 # Headers sent on every request. Per-request headers override Accept and
-# add Origin / X-Requested-With / Referer overrides as needed (see search
-# and try_book). All values verified against artifacts/http_trace.json.
+# add Origin / X-Requested-With / Referer overrides as needed (see search,
+# cell_click, and submit). All values verified against artifacts/http_trace.json.
 _DEFAULT_HEADERS = {
     "User-Agent": _CHROME_UA,
     "Accept-Language": "en-US,en;q=0.9",
@@ -501,150 +501,3 @@ class PolyUHttpClient:
         )
         return err
 
-    async def try_book(self, slot: AvailableSlot) -> BookingResult:
-        """Attempt to book a specific (facility, time-range) slot.
-
-        Two POSTs:
-          1. make_book.do (form-encoded) — selects the cell + advances.
-             Expect 302 → make_book_submit.do. Any other status ⇒ OCCUPIED.
-          2. make_book_submit.do (multipart) — final commit + agreement.
-             Expect 302 → make_book_result.do (SUCCESS).
-             302 back to make_book_submit.do OR 200 with "occupied" banner ⇒ OCCUPIED.
-             Anything else ⇒ ERROR.
-        """
-        from src.config import (
-            MAKE_BOOK_URL,
-            MAKE_BOOK_SUBMIT_URL,
-            TENNIS_ACTV_ID,
-            TENNIS_DATA_SET_ID,
-        )
-
-        date_str = slot.start_dt.strftime("%d/%m/%Y")
-        # Pre-encode the date in the inner searchFormString. The outer form-encoding
-        # will encode the resulting %2F again to %252F, matching the captured trace.
-        inner_date = quote(date_str, safe="")  # "10%2F06%2F2026"
-        search_form_str = (
-            f"fbUserId={self.fb_user_id}&bookType=INDV"
-            f"&dataSetId={TENNIS_DATA_SET_ID}&actvId={TENNIS_ACTV_ID}"
-            f"&searchDate={inner_date}&ctrId={slot.center_id}&facilityId="
-        )
-
-        cell_form = {
-            "brcdNo": "",
-            "phone": "",
-            "extlPtyDclrId": "",
-            "dataSetId": str(TENNIS_DATA_SET_ID),
-            "actvId": str(TENNIS_ACTV_ID),
-            "onBehalfOfFbUserId": "",
-            "byPassQuota": "false",
-            "byPassChrgSchm": "false",
-            "byPassBookingDaysLimit": "false",
-            "repeatOccurrence": "false",
-            "grpFacilityIds": "",
-            "searchFormString": search_form_str,
-            "boMakeBookFacilities[0].ctrId": str(slot.center_id),
-            "boMakeBookFacilities[0].facilityId": str(slot.facility_id),
-            "boMakeBookFacilities[0].startDateTime": _fmt_polyu_dt(slot.start_dt),
-            "boMakeBookFacilities[0].endDateTime": _fmt_polyu_dt(slot.end_dt),
-            "CSRFToken": self.csrf_token,
-        }
-
-        try:
-            cell_resp = await self._http.post(
-                MAKE_BOOK_URL,
-                data=cell_form,
-                headers={
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Origin": _ORIGIN,
-                    "Referer": _REFERER_MAKE_BOOK,
-                    "Upgrade-Insecure-Requests": "1",
-                },
-            )
-        except httpx.HTTPError as exc:
-            _LOG.warning("cell-click transport error: %r", exc)
-            return BookingResult.ERROR_TRANSIENT
-
-        cell_location = cell_resp.headers.get("location", "")
-        if cell_resp.status_code == 302 and "make_book_submit" in cell_location:
-            pass  # cell click accepted — fall through to Submit
-        elif cell_resp.status_code in (200, 302) and (
-            "Facility is occupied" in (cell_resp.text or "")
-            or "make_book" in cell_location
-        ):
-            return BookingResult.OCCUPIED
-        else:
-            err = _classify_http_error(cell_resp.status_code)
-            _LOG.warning(
-                "cell-click unexpected response (stage=cell, status=%d, location=%r) -> %s",
-                cell_resp.status_code, cell_location, err.name,
-            )
-            return err
-
-        submit_fields = {
-            "dataSetId": str(TENNIS_DATA_SET_ID),
-            "boBookingType.id": "1",
-            "boBookingType.value": "INDV",
-            "boBookingMode.value": "SPORT",
-            "boBookingMode.id": "1",
-            "userRefNum": "",
-            "fbUserId": self.fb_user_id,
-            "grpFacilityIds": "",
-            "repeatOccurrence": "false",
-            "startDate": "",
-            "startTime": "",
-            "endDate": "",
-            "endTime": "",
-            "dayOfWeeks": "",
-            "functionsAvailable": "false",
-            "brcdNo": "",
-            "phone": "",
-            "onBehalfOfFbUserId": "",
-            "byPassQuota": "false",
-            "byPassChrgSchm": "false",
-            "byPassBookingDaysLimit": "false",
-            "searchFormString": search_form_str,
-            "extlPtyDclrId": "",
-            "boMakeBookFacilities[0].ctrId": str(slot.center_id),
-            "boMakeBookFacilities[0].centerName": slot.center_name,
-            "boMakeBookFacilities[0].facilityId": str(slot.facility_id),
-            "boMakeBookFacilities[0].facilityName": slot.facility_name,
-            "boMakeBookFacilities[0].startDateTime": _fmt_polyu_dt(slot.start_dt),
-            "boMakeBookFacilities[0].endDateTime": _fmt_polyu_dt(slot.end_dt),
-            "declare": "on",
-            "CSRFToken": self.csrf_token,
-        }
-        # httpx multipart encoding: pass `files={}` to force multipart even
-        # for text-only fields. Each value becomes (None, value) — None means
-        # no filename, which httpx renders as a plain text form part.
-        multipart_files = {
-            name: (None, value) for name, value in submit_fields.items()
-        }
-        try:
-            submit_resp = await self._http.post(
-                MAKE_BOOK_SUBMIT_URL,
-                files=multipart_files,
-                headers={
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Origin": _ORIGIN,
-                    "Referer": _REFERER_MAKE_BOOK_SUBMIT,
-                    "Upgrade-Insecure-Requests": "1",
-                },
-            )
-        except httpx.HTTPError as exc:
-            _LOG.warning("submit transport error: %r", exc)
-            return BookingResult.ERROR_TRANSIENT
-
-        submit_location = submit_resp.headers.get("location", "")
-        if submit_resp.status_code == 302 and "make_book_result" in submit_location:
-            return BookingResult.SUCCESS
-        if submit_resp.status_code in (200, 302) and (
-            "Facility is occupied" in (submit_resp.text or "")
-            or "make_book_submit" in submit_location
-        ):
-            return BookingResult.OCCUPIED
-        err = _classify_http_error(submit_resp.status_code)
-        _LOG.warning(
-            "submit unexpected response (stage=submit, status=%d, location=%r) -> %s",
-            submit_resp.status_code, submit_location, err.name,
-        )
-        return err

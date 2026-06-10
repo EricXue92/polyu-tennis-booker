@@ -101,8 +101,8 @@ async def test_client_constructs_with_required_session_state():
 async def test_client_sets_chrome_user_agent_and_sec_ch_ua():
     # Defensive: mimic the captured Playwright Chromium headers so PolyU
     # doesn't 4xx us for "non-browser" requests. Per-request Referer /
-    # Accept / Origin / X-Requested-With are set inside search() and
-    # try_book(); only the truly common headers live on the client.
+    # Accept / Origin / X-Requested-With are set inside search(), cell_click(),
+    # and submit(); only the truly common headers live on the client.
     from src.http_client import PolyUHttpClient
     client = PolyUHttpClient(
         cookies={"JSESSIONID": "abc"},
@@ -220,220 +220,6 @@ def _slot_11_at_1230() -> "AvailableSlot":
     )
 
 
-@pytest.mark.asyncio
-@respx.mock
-async def test_try_book_happy_path_returns_success():
-    from src.http_client import PolyUHttpClient, BookingResult
-
-    respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
-    ).mock(return_value=Response(
-        302,
-        headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"},
-    ))
-    respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
-    ).mock(return_value=Response(
-        302,
-        headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_result.do"},
-    ))
-
-    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="tok", fb_user_id="432567")
-    try:
-        result = await client.try_book(_slot_11_at_1230())
-    finally:
-        await client.aclose()
-    assert result is BookingResult.SUCCESS
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_try_book_occupied_when_submit_redirects_back():
-    from src.http_client import PolyUHttpClient, BookingResult
-
-    respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
-    ).mock(return_value=Response(
-        302,
-        headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"},
-    ))
-    # Submit fails: server redirects back to make_book_submit.do (the user
-    # never reaches make_book_result.do) — the "Facility is occupied" path.
-    respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
-    ).mock(return_value=Response(
-        200,
-        text="<html><body>Facility is occupied</body></html>",
-    ))
-
-    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="tok", fb_user_id="432567")
-    try:
-        result = await client.try_book(_slot_11_at_1230())
-    finally:
-        await client.aclose()
-    assert result is BookingResult.OCCUPIED
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_try_book_occupied_when_cell_click_rejected():
-    # If by the time we POST cell+Next, the slot is already gone, PolyU's
-    # response shape is harder to predict from one captured trace. We
-    # treat a non-302 from make_book.do as OCCUPIED (the most likely cause).
-    from src.http_client import PolyUHttpClient, BookingResult
-
-    respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
-    ).mock(return_value=Response(
-        200,
-        text="<html>Facility is occupied</html>",
-    ))
-
-    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="tok", fb_user_id="432567")
-    try:
-        result = await client.try_book(_slot_11_at_1230())
-    finally:
-        await client.aclose()
-    assert result is BookingResult.OCCUPIED
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_try_book_transient_error_on_network_failure():
-    # Network errors are transient — the next candidate may still work.
-    from src.http_client import PolyUHttpClient, BookingResult
-    import httpx
-
-    respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
-    ).mock(side_effect=httpx.ConnectError("boom"))
-
-    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="tok", fb_user_id="432567")
-    try:
-        result = await client.try_book(_slot_11_at_1230())
-    finally:
-        await client.aclose()
-    assert result is BookingResult.ERROR_TRANSIENT
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_try_book_sends_correct_cell_click_body():
-    from src.http_client import PolyUHttpClient
-
-    captured = {}
-    def record_make_book(request):
-        captured["url"] = str(request.url)
-        captured["body"] = request.content.decode()
-        return Response(
-            302,
-            headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"},
-        )
-    def record_submit(request):
-        captured["submit_url"] = str(request.url)
-        captured["submit_body"] = request.content.decode()
-        captured["submit_ct"] = request.headers.get("content-type", "")
-        return Response(302, headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_result.do"})
-
-    respx.post("https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do").mock(side_effect=record_make_book)
-    respx.post("https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do").mock(side_effect=record_submit)
-
-    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="tok-Z", fb_user_id="432567")
-    try:
-        await client.try_book(_slot_11_at_1230())
-    finally:
-        await client.aclose()
-
-    body = captured["body"]
-    assert "CSRFToken=tok-Z" in body
-    assert "dataSetId=18" in body
-    assert "actvId=10" in body
-    assert "boMakeBookFacilities%5B0%5D.ctrId=1" in body
-    assert "boMakeBookFacilities%5B0%5D.facilityId=11" in body
-    # Format from the trace: "10 Jun 2026 12:30" with spaces URL-encoded.
-    assert "boMakeBookFacilities%5B0%5D.startDateTime=10+Jun+2026+12%3A30" in body
-    assert "boMakeBookFacilities%5B0%5D.endDateTime=10+Jun+2026+13%3A30" in body
-    # Inner searchFormString must have pre-encoded slashes (becomes %252F after outer encode)
-    assert "searchFormString=" in body
-    # After outer decode, the inner value should have %2F (pre-encoded).
-    # In the wire body, the slashes appear as %252F.
-    assert "%252F06%252F2026" in body
-
-    # Submit body is multipart with the agreement checkbox set.
-    assert "multipart/form-data" in captured["submit_ct"]
-    sb = captured["submit_body"]
-    assert 'name="dataSetId"' in sb and "18" in sb
-    assert 'name="boMakeBookFacilities[0].facilityId"' in sb and "11" in sb
-    assert 'name="boMakeBookFacilities[0].centerName"' in sb and "Shaw Sports Complex" in sb
-    assert 'name="boMakeBookFacilities[0].facilityName"' in sb and "Tennis Court No. 2" in sb
-    assert 'name="boMakeBookFacilities[0].startDateTime"' in sb and "10 Jun 2026 12:30" in sb
-    assert 'name="declare"' in sb and "on" in sb
-    assert 'name="CSRFToken"' in sb and "tok-Z" in sb
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_try_book_transient_error_on_5xx_cell_click():
-    # 5xx at slot-open is usually PolyU's app server briefly overloaded by the
-    # 08:30 thundering herd. The session is still valid, so advance to the
-    # next candidate rather than aborting.
-    from src.http_client import PolyUHttpClient, BookingResult
-
-    respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
-    ).mock(return_value=Response(500, text="Internal Server Error"))
-
-    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="tok", fb_user_id="432567")
-    try:
-        result = await client.try_book(_slot_11_at_1230())
-    finally:
-        await client.aclose()
-    assert result is BookingResult.ERROR_TRANSIENT
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_try_book_fatal_error_on_unexpected_4xx_cell_click():
-    # 4xx (e.g. 401/403/404) means our session or request shape is wrong —
-    # other candidates won't fare better. Abort.
-    from src.http_client import PolyUHttpClient, BookingResult
-
-    respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
-    ).mock(return_value=Response(403, text="Forbidden"))
-
-    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="tok", fb_user_id="432567")
-    try:
-        result = await client.try_book(_slot_11_at_1230())
-    finally:
-        await client.aclose()
-    assert result is BookingResult.ERROR_FATAL
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_try_book_transient_error_on_5xx_submit():
-    # Cell-click ok, but Submit hits a 5xx — still transient.
-    from src.http_client import PolyUHttpClient, BookingResult
-
-    respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
-    ).mock(return_value=Response(
-        302,
-        headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"},
-    ))
-    respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
-    ).mock(return_value=Response(502, text="Bad Gateway"))
-
-    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="tok", fb_user_id="432567")
-    try:
-        result = await client.try_book(_slot_11_at_1230())
-    finally:
-        await client.aclose()
-    assert result is BookingResult.ERROR_TRANSIENT
-
-
 def test_classify_http_error_splits_on_status():
     from src.http_client import _classify_http_error, BookingResult
     assert _classify_http_error(500) is BookingResult.ERROR_TRANSIENT
@@ -493,43 +279,6 @@ async def test_search_sends_ajax_headers():
     assert captured["headers"].get("x-requested-with") == "XMLHttpRequest"
     assert "application/json" in captured["headers"].get("accept", "")
     assert "make_book.do" in captured["headers"].get("referer", "")
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_try_book_sends_origin_and_correct_referers():
-    """The 403-Forbidden post-mortem: cell-click and Submit need Origin +
-    Upgrade-Insecure-Requests; final Submit has a DIFFERENT Referer
-    (make_book_submit.do, not make_book.do)."""
-    from src.http_client import PolyUHttpClient
-
-    captured = {}
-    def record_cell(request):
-        captured["cell_headers"] = dict(request.headers)
-        return Response(302, headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"})
-    def record_submit(request):
-        captured["submit_headers"] = dict(request.headers)
-        return Response(302, headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_result.do"})
-
-    respx.post("https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do").mock(side_effect=record_cell)
-    respx.post("https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do").mock(side_effect=record_submit)
-
-    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
-    try:
-        await client.try_book(_slot_11_at_1230())
-    finally:
-        await client.aclose()
-
-    # Cell-click: Origin + make_book.do referer + UIR.
-    assert captured["cell_headers"].get("origin") == "https://www40.polyu.edu.hk"
-    assert "make_book.do" in captured["cell_headers"].get("referer", "")
-    assert "make_book_submit" not in captured["cell_headers"].get("referer", "")
-    assert captured["cell_headers"].get("upgrade-insecure-requests") == "1"
-
-    # Final Submit: Origin + make_book_submit.do referer + UIR.
-    assert captured["submit_headers"].get("origin") == "https://www40.polyu.edu.hk"
-    assert "make_book_submit.do" in captured["submit_headers"].get("referer", "")
-    assert captured["submit_headers"].get("upgrade-insecure-requests") == "1"
 
 
 def test_cell_outcome_has_four_outcomes():
@@ -1002,3 +751,44 @@ async def test_warmup_n_fires_concurrently_not_serially():
     assert results == [200, 200, 200, 200]
     # If sequential: ~0.4s. If concurrent: ~0.1s. 0.25s threshold absorbs CI jitter.
     assert elapsed < 0.25, f"warmup ran sequentially (took {elapsed:.2f}s)"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_cell_click_sends_correct_form_and_headers():
+    from src.http_client import PolyUHttpClient
+
+    captured = {}
+    def record(request):
+        captured["url"] = str(request.url)
+        captured["body"] = request.content.decode()
+        captured["headers"] = dict(request.headers)
+        return Response(
+            302,
+            headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"},
+        )
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+    ).mock(side_effect=record)
+
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="tok-Z", fb_user_id="432567")
+    try:
+        await client.cell_click(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+
+    body = captured["body"]
+    assert "CSRFToken=tok-Z" in body
+    assert "dataSetId=18" in body
+    assert "actvId=10" in body
+    assert "boMakeBookFacilities%5B0%5D.ctrId=1" in body
+    assert "boMakeBookFacilities%5B0%5D.facilityId=11" in body
+    assert "boMakeBookFacilities%5B0%5D.startDateTime=10+Jun+2026+12%3A30" in body
+    assert "boMakeBookFacilities%5B0%5D.endDateTime=10+Jun+2026+13%3A30" in body
+    assert "%252F06%252F2026" in body
+
+    headers = captured["headers"]
+    assert headers.get("origin") == "https://www40.polyu.edu.hk"
+    assert "make_book.do" in headers.get("referer", "")
+    assert "make_book_submit" not in headers.get("referer", "")
+    assert headers.get("upgrade-insecure-requests") == "1"
