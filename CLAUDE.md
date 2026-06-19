@@ -46,10 +46,12 @@ and hands off to `src/http_booker.py:book_via_http`. That orchestrator
 **skips search** and runs two phases over the
 `(SLOT_PRIORITY × TENNIS_FACILITIES)` candidate set: phase 1 fires every
 candidate's `client.cell_click()` concurrently via `asyncio.gather`;
-phase 2 walks the ACCEPTED results in priority order (priority-major,
-facility-minor) calling `client.submit()` sequentially. SUCCESS wins,
-OCCUPIED or ERROR_TRANSIENT advances to the next ACCEPTED candidate,
-submit-stage ERROR_FATAL aborts remaining submits. The client
+phase 2 groups ACCEPTED cells by `(start, end)` time-slot preserving
+rank order, fires `client.submit()` **concurrently within each group**,
+and walks groups **sequentially in priority order**. Any SUCCESS in a
+group wins (lowest-rank preferred if multiple). OCCUPIED / ERROR_TRANSIENT
+advance to the next group; ERROR_FATAL with no SUCCESS sibling aborts
+remaining groups. The client
 (`src/http_client.py`) issues the booking POSTs (make_book.do,
 make_book_submit.do) over raw httpx — no Playwright, no search on the
 hot path. (`PolyUHttpClient.search()` still exists for diagnostic use
@@ -130,7 +132,8 @@ Things that aren't obvious from a single file:
   if so, raises `LoginFailed` distinctly so wrong-credentials show up as a
   meaningful failure, not a downstream selector timeout.
 
-- **Predictive booking — no search on the hot path, parallel cell-clicks.**
+- **Predictive booking — no search on the hot path, parallel cell-clicks,
+  time-grouped parallel submits.**
   PolyU's Search endpoint takes ~4.5s server-side, and during 2026-06-04's
   run all desired slots were stolen inside that window. So `book_via_http`
   fabricates `AvailableSlot`s from `(SLOT_PRIORITY × TENNIS_FACILITIES)`
@@ -138,23 +141,47 @@ Things that aren't obvious from a single file:
   all candidate cell_clicks via `asyncio.gather` so the "first-POST 5-6s
   cold tax" no longer stacks across candidates (2026-06-07 and 2026-06-09
   failures happened on a serial loop where 6s on the first POST burned
-  all four slots). Phase 2 walks ACCEPTED cell results in priority order
-  (priority-major, facility-minor: all facilities for rank 0 tried before
-  rank 1 — user intent: "I want 18:30, any court, before I'll accept
-  19:30") calling submit sequentially. **Strict priority guarantee:** SUCCESS
-  on rank 0 cannot be beaten by rank 3 because submit is serialised. Per-attempt
-  latency is ~400ms (cell-click) + ~400ms (submit on success). Cell-click
-  OCCUPIED, ERROR_TRANSIENT (5xx/network), and ERROR_FATAL (4xx/unknown
-  shape) are all **per-candidate**: a single FATAL cell-click does not
-  abort the run — only when zero cell-clicks return ACCEPTED. Submit
-  OCCUPIED and ERROR_TRANSIENT advance to the next ACCEPTED candidate;
-  submit ERROR_FATAL aborts remaining submits (auth presumed dead).
-  `cell_click` and `submit` log body diagnostics (status + Location +
-  body_len + preview + marker substrings) on every ERROR_* so anomalies
-  like 2026-06-09's `200 + empty Location` are root-causeable from CI
-  logs alone. Candidates for facility IDs that don't exist on the target
-  date return OCCUPIED via the same code path — semantics don't change,
-  we just waste one POST per nonexistent facility.
+  all four slots). Phase 2 groups ACCEPTED cells by `(start, end)` and
+  fires each group's submits in parallel via `asyncio.gather`; groups are
+  walked sequentially in priority order. **Time-major priority is
+  preserved** (all 18:30 attempts finish before any 19:30 attempt starts —
+  matches the user's "any court at 18:30 before 19:30" intent), but
+  facility ordering within a timeslot is sacrificed: rank 0 (Court 1) and
+  rank 1 (Court 2) race against each other. This replaced earlier serial-
+  submit logic that deadlocked on 2026-06-18 when rank 0 submit hung 10s
+  (ReadTimeout) and locked out rank 1/2/3. With parallel-within-group, a
+  hung rank 0 no longer blocks its siblings; the group `gather` resolves
+  in `max(latency)` not `sum(latency)`. Per-attempt latency is ~400ms
+  (cell-click) + ~400ms (submit on success). Cell-click OCCUPIED,
+  ERROR_TRANSIENT (5xx/network), and ERROR_FATAL (4xx/unknown shape) are
+  all **per-candidate**: a single FATAL cell-click does not abort the run.
+  Within a submit group: any SUCCESS wins (lowest rank preferred if
+  multiple — see double-booking note below); OCCUPIED / ERROR_TRANSIENT
+  advance to the next group; ERROR_FATAL with no SUCCESS sibling aborts
+  remaining groups (auth presumed dead), but a parallel SUCCESS in the
+  same group overrides the FATAL (auth is clearly alive). `cell_click`
+  and `submit` log body diagnostics (status + Location + body_len +
+  preview + marker substrings) on every ERROR_* so anomalies like
+  2026-06-09's `200 + empty Location` are root-causeable from CI logs
+  alone. Candidates for facility IDs that don't exist on the target date
+  return OCCUPIED via the same code path — semantics don't change, we
+  just waste one POST per nonexistent facility.
+
+- **Double-booking risk inside a parallel group is accepted.** If both
+  rank 0 (Court 1 @ 18:30) and rank 1 (Court 2 @ 18:30) submits return
+  SUCCESS at the same instant, we own two slots. Empirically this has
+  never happened in contested windows (slots are too scarce), but if it
+  does, `book_via_http` logs a WARNING listing the surplus booking so the
+  user can cancel manually. We deliberately don't auto-cancel — adding a
+  cancel-booking HTTP path is scope creep relative to how rare this is.
+
+- **HTTP client timeout is 6s.** `PolyUHttpClient(timeout=6.0)` bounds any
+  single request at 6 seconds. Floor is set by the slowest observed
+  legitimate SUCCESS submit (5.3s on 2026-06-16, rank 0); ceiling reduced
+  from the previous 10s to limit damage from PolyU hangs (2026-06-18's
+  10s ReadTimeout cost us all four slots). cell_click latencies on a
+  warm pool are 150-300ms so 6s leaves them untouched. If submit
+  legitimately needs > 6s in future, expect false TRANSIENTs and reopen.
 
 - **Submit success/failure detection is direct, no timeout.** With
   Playwright we raced `wait_for_url` against `wait_for_selector("Facility

@@ -183,8 +183,13 @@ class PolyUHttpClient:
         cookies,
         csrf_token: str,
         fb_user_id: str,
-        timeout: float = 10.0,
+        timeout: float = 6.0,
     ) -> None:
+        # 6s upper bound on any single request. The slowest observed legitimate
+        # SUCCESS submit was 5.3s (2026-06-16, rank 0); 6s gives small margin
+        # over that while bounding ReadTimeout disasters like 2026-06-18
+        # (10s wait poisoned the whole strict-priority chain). cell_click
+        # latencies on warm pool are 150-300ms so this doesn't squeeze them.
         self.csrf_token = csrf_token
         self.fb_user_id = fb_user_id
         self._http = httpx.AsyncClient(

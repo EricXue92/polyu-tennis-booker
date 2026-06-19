@@ -1,17 +1,27 @@
-"""HTTP-based booking orchestrator (parallel cell-clicks).
+"""HTTP-based booking orchestrator (parallel cell-clicks, time-grouped submits).
 
 Phase 1: fire all (priority x facility) cell_click POSTs concurrently via
 asyncio.gather. They finish in roughly first-POST latency, not stacked, so
 the "first-POST 5-6s cold tax" no longer cascades onto candidates 2-4.
 
-Phase 2: walk cell_click results in priority order. For each ACCEPTED slot,
-call submit serially. SUCCESS returns 0 immediately. OCCUPIED or
-ERROR_TRANSIENT advances to the next ACCEPTED candidate. ERROR_FATAL aborts
-remaining submits (auth presumed dead - further submits will hit the same
-wall).
+Phase 2: group ACCEPTED cells by their (start, end) time-slot, preserving rank
+order. Within each group, fire submits concurrently via asyncio.gather; between
+groups, walk sequentially in priority order. Any SUCCESS in a group wins (and
+we report the lowest-rank SUCCESS if multiple). ERROR_FATAL aborts further
+groups, but only if no SUCCESS in the same group (a parallel SUCCESS proves
+auth is alive). OCCUPIED / ERROR_TRANSIENT advance to the next group.
 
-Strict priority guarantee: submit always runs sequentially in priority order.
-It is impossible to book rank 3 when rank 0 also succeeded.
+Priority semantics: the user's preference is time-major, facility-minor
+("any court at 18:30 before 19:30"). Parallel-within-group respects that:
+18:30/court1 and 18:30/court2 race together; both 18:30 attempts finish
+before 19:30 attempts start. The previous strict facility-priority within a
+time-slot is sacrificed - a slow rank 0 submit (10s ReadTimeout on
+2026-06-18) used to lock out the whole chain.
+
+A multi-SUCCESS within one group is theoretically possible (two different
+courts both committing for the same user at the same time) but unobserved
+in production because contested slots are scarce. If it happens, we log a
+WARNING with the surplus bookings so they can be cancelled manually.
 
 Cell-click ERROR_TRANSIENT and ERROR_FATAL are tolerated at the candidate
 level - a facility-specific failure does not poison sibling candidates.
@@ -20,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import OrderedDict
 from datetime import date, datetime, time
 from typing import Protocol
 
@@ -67,7 +78,7 @@ async def book_via_http(
     *,
     log: logging.Logger,
 ) -> int:
-    """Run the parallel cell-click + priority-ordered submit flow.
+    """Run the parallel cell-click + time-grouped submit flow.
 
     Returns 0 on SUCCESS, 1 otherwise.
     """
@@ -104,20 +115,53 @@ async def book_via_http(
         )
         return 1
 
-    # Phase 2: sequential submit, strict priority order.
+    # Phase 2: group ACCEPTED by (start, end) preserving rank order.
+    groups: "OrderedDict[tuple[datetime, datetime], list[tuple[int, AvailableSlot]]]" = OrderedDict()
     for rank, slot in accepted:
-        result = await client.submit(slot)
-        log.info("submit rank=%d %s: %s", rank, slot.facility_name, result.name)
-        if result is BookingResult.SUCCESS:
+        groups.setdefault((slot.start_dt, slot.end_dt), []).append((rank, slot))
+
+    for (start_dt, _end_dt), group in groups.items():
+        results = await asyncio.gather(
+            *(client.submit(slot) for _, slot in group)
+        )
+        for (rank, slot), result in zip(group, results):
+            log.info("submit rank=%d %s: %s", rank, slot.facility_name, result.name)
+
+        # SUCCESS first: any SUCCESS in this group wins. If multiple, prefer
+        # the lowest-rank one (group is already rank-ordered) and warn about
+        # the surplus so the user can cancel manually.
+        successes = [
+            (rank, slot)
+            for (rank, slot), result in zip(group, results)
+            if result is BookingResult.SUCCESS
+        ]
+        if successes:
+            winner_rank, winner_slot = successes[0]
             log.info(
                 "done: booked %s @ %s (rank=%d)",
-                slot.facility_name, slot.start_dt.strftime("%H:%M"), rank,
+                winner_slot.facility_name,
+                winner_slot.start_dt.strftime("%H:%M"),
+                winner_rank,
             )
+            if len(successes) > 1:
+                surplus = [(r, s.facility_name) for r, s in successes[1:]]
+                log.warning(
+                    "multi-SUCCESS in timeslot %s: also booked %s — cancel manually",
+                    start_dt.strftime("%H:%M"),
+                    surplus,
+                )
             return 0
-        if result is BookingResult.ERROR_FATAL:
-            log.error("submit ERROR_FATAL; aborting remaining submits (auth presumed dead)")
+
+        # No SUCCESS in this group. A FATAL with no SUCCESS sibling means
+        # auth is presumably dead — further groups would hit the same wall.
+        if any(r is BookingResult.ERROR_FATAL for r in results):
+            log.error(
+                "submit ERROR_FATAL with no SUCCESS in timeslot %s; "
+                "aborting remaining groups (auth presumed dead)",
+                start_dt.strftime("%H:%M"),
+            )
             return 1
-        # OCCUPIED or ERROR_TRANSIENT -> try next ACCEPTED candidate.
+        # OCCUPIED / ERROR_TRANSIENT only -> try next timeslot group.
 
     log.warning("no submit succeeded among %d ACCEPTED candidates; exiting 1", len(accepted))
     return 1
