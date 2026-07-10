@@ -30,199 +30,113 @@ gh run watch <id> --interval 15 --exit-status                  # block until don
 doesn't actually book a court). `--skip-sleep` runs immediately instead of
 waiting until 08:30 HKT.
 
-Selector discovery (when the PolyU UI changes — see below):
-
-```bash
-POLYU_USERNAME=... POLYU_PASSWORD=... \
-    uv run python scripts/discover_selectors.py
-```
-
 ## Architecture
 
-The booking flow spans three files. `src/booker.py:run` does Playwright
-login at 08:29, extracts session state (cookies + CSRFToken + fbUserId)
-via `bootstrap_http_client`, closes the browser, sleeps to 08:30:00.000,
-and hands off to `src/http_booker.py:book_via_http`. That orchestrator
-**skips search** and runs two phases over the
-`(SLOT_PRIORITY × TENNIS_FACILITIES)` candidate set: phase 1 fires every
-candidate's `client.cell_click()` concurrently via `asyncio.gather`;
-phase 2 groups ACCEPTED cells by `(start, end)` time-slot preserving
-rank order, fires `client.submit()` **concurrently within each group**,
-and walks groups **sequentially in priority order**. Any SUCCESS in a
-group wins (lowest-rank preferred if multiple). OCCUPIED / ERROR_TRANSIENT
-advance to the next group; ERROR_FATAL with no SUCCESS sibling aborts
-remaining groups. The client
-(`src/http_client.py`) issues the booking POSTs (make_book.do,
-make_book_submit.do) over raw httpx — no Playwright, no search on the
-hot path. (`PolyUHttpClient.search()` still exists for diagnostic use
-but isn't called in production.)
+The booking flow spans three files. `src/booker.py:run` does Playwright login
+at 08:29, extracts session state (cookies + CSRFToken + fbUserId) via
+`bootstrap_http_client`, closes the browser, sleeps to 08:30:00.000, and hands
+off to `src/http_booker.py:book_via_http`. That orchestrator **skips search**
+and runs two phases over the `(SLOT_PRIORITY × TENNIS_FACILITIES)` candidate
+set: phase 1 fires every candidate's `cell_click()` concurrently via
+`asyncio.gather`; phase 2 groups ACCEPTED cells by `(start, end)` time-slot
+preserving rank order, fires each group's `submit()` concurrently, and walks
+groups sequentially in priority order. The client (`src/http_client.py`)
+issues the booking POSTs (make_book.do, make_book_submit.do) over raw httpx —
+no Playwright, no search on the hot path. (`PolyUHttpClient.search()` still
+exists for diagnostic use but isn't called in production.)
 
-Things that aren't obvious from a single file:
+Incident history and full design rationale live in `docs/superpowers/specs/`
+and `docs/superpowers/plans/` — read the most recent files there before
+substantive changes.
 
-- **External Cloudflare Worker triggers the workflow.** GitHub Actions'
-  scheduled cron proved unreliable (skipped days, multi-hour delays), so a
-  Cloudflare Worker (`infra/cloudflare-worker/`) calls `workflow_dispatch`
-  API at 07:30 HKT daily. The 60-minute lead absorbs GitHub Actions runner
-  queue delays (observed up to 35 min on 2026-05-16, which made the
-  previous 08:20 cron miss the 08:30 slot-open). The booker still calls
-  `sleep_until_hkt` to land on 08:30:00.000 regardless of when it started. A second cron in the same Worker fires at 08:35 HKT and
-  opens a GitHub issue if no successful run exists for the day (the issue
-  auto-emails the repo owner). The workflow itself has no `schedule:`
-  block — `workflow_dispatch` only.
+## Invariants (do not break these)
 
-- **PolyU releases 7-days-ahead slots at EXACTLY 08:30 HKT.** Booking before
-  that time sees no available slots; booking late loses popular slots to
-  other users. The whole hedged-trigger architecture (CF fires at 07:30,
-  runner cold-starts, booker sleeps to 08:30:00.000) exists to land on this
-  exact moment with environment pre-warmed. Never propose changes that
-  would let the booker run before 08:30 HKT (e.g., `skip_sleep=true`,
-  removing the `sleep_until_hkt` call, lowering `TRIGGER_TIME_HKT`).
-
-- **Three-phase sleep — login is intentionally BEFORE 08:30, and there's
-  a TLS warmup between the two.** `run()` sleeps to
-  `TRIGGER_TIME_HKT - PRELOGIN_LEAD_SECONDS` (08:29:00), runs Playwright
-  `login` (~2-3s) and `bootstrap_http_client` to extract cookies +
-  CSRFToken + fbUserId, closes the browser, then sleeps to
-  `TRIGGER_TIME_HKT - WARMUP_LEAD_SECONDS` (08:29:58), calls
-  `client.warmup(n=len(candidates))` (N concurrent GETs against
-  make_book.do that prime TCP+TLS for every candidate in the pool),
-  then sleeps the last ~1s to 08:30:00.000 before calling
-  `book_via_http`. The warmup exists because servers drop idle keepalive
-  connections within 15-30s — on 2026-06-05 the first cell-click POST
-  paid a 5.5s cold-handshake cost and all four candidates returned
-  OCCUPIED. A single warm connection only helps the first concurrent
-  POST; the other N-1 still cold-handshake — hence warmup(n). Do not
-  collapse the sleeps into one and do not skip the warmup — landing
-  every cell-click on a warm connection at 08:30:00.000 is the entire
-  point.
-
-- **`skip_sleep` default MUST stay `false` in book.yml.** CF Worker calls
-  `workflow_dispatch` with no inputs, so defaults apply. If `skip_sleep`
-  defaults to `true`, the booker runs at 08:23 (after runner cold-start)
-  before PolyU's 08:30 slot-open, and bookings will silently fail. The CF
-  Worker also hardcodes `ref: "main"` — testing on a branch requires
-  explicit `gh workflow run --ref <branch>`.
-
-- **Exit codes drive notification.** Exit 0 = booked successfully (silent).
-  Exit 1 = no slot in any priority window, or any error (login failure,
-  selector timeout, etc.) — GitHub emails the workflow owner on failure.
-  There is deliberately no success notification path.
-
-- **Selectors are externalized.** `src/config.py:Selectors` holds every CSS
-  selector and the Tennis activity dropdown value. They were discovered by
-  running `scripts/discover_selectors.py` against the live system. When the
-  PolyU UI changes (symptom: `Selector ... is not configured` or a Playwright
-  timeout on a specific element), re-run discovery, inspect `artifacts/*.html`,
-  and update the dataclass. `require()` raises a clear error if any field is
-  left as the `PENDING_DISCOVERY` sentinel.
-
-- **HTTP request shapes are externalized too.** `scripts/capture_http.py`
-  is the HTTP analogue of `discover_selectors.py`: it runs the booking
-  flow under Playwright with `context.on("request"/"response")` hooks
-  and dumps `artifacts/http_trace.json` (passwords and cookie values
-  redacted). Used by `src/http_client.py` to build/maintain the raw
-  HTTP request templates that replace Playwright on the hot path.
-  Re-run when PolyU changes its booking endpoints or form fields
-  (symptom: `PolyUHttpClient` 4xxs or returns unexpected response
-  shape). Requires a known free off-peak slot — see the comment block
-  at the top of the script for usage.
-
+- **PolyU releases 7-days-ahead slots at EXACTLY 08:30 HKT.** Never let the
+  booker run before 08:30 (no `skip_sleep=true` by default, don't remove the
+  `sleep_until_hkt` call, don't lower `TRIGGER_TIME_HKT`). Early sees no
+  slots; late loses popular slots.
+- **An external Cloudflare Worker triggers the workflow**
+  (`infra/cloudflare-worker/`) at 07:30 HKT via `workflow_dispatch` — GH
+  Actions' scheduled cron proved unreliable, so the workflow has **no
+  `schedule:` block**. The 60-min lead absorbs runner queue delays (observed
+  up to 35 min); the booker sleeps to 08:30:00.000 regardless of start time.
+  A second Worker cron at 08:35 opens a GitHub issue (auto-emails the owner)
+  if no successful run exists for the day.
+- **`skip_sleep` default MUST stay `false` in book.yml.** The CF Worker
+  dispatches with no inputs, so defaults apply — `true` would book before
+  slot-open and silently fail. The Worker also hardcodes `ref: "main"`.
+- **Three-phase sleep — do not collapse or skip the warmup.** Sleep to
+  08:29:00 → Playwright login + `bootstrap_http_client`, close browser; sleep
+  to 08:29:58 → `client.warmup(n=len(candidates))` (servers drop idle
+  keepalives within 15–30s, and one warm connection only helps the first
+  concurrent POST, so warmup primes TCP+TLS for every candidate); sleep to
+  08:30:00.000 → fire. Landing every cell-click on a warm connection at
+  exactly 08:30 is the entire point; a cold handshake costs ~5s and loses the
+  run.
+- **No search on the hot path.** PolyU's Search endpoint takes ~4.5s
+  server-side — long enough to lose every desired slot. `book_via_http`
+  fabricates `AvailableSlot`s from the candidate set and goes straight to
+  `make_book.do`. Candidates for facility IDs that don't exist on the target
+  date just return OCCUPIED (one wasted POST, same code path).
+- **Parallel semantics.** Cell-click results (OCCUPIED / ERROR_TRANSIENT /
+  ERROR_FATAL) are **per-candidate** — one FATAL does not abort the run.
+  Within a submit group: any SUCCESS wins (lowest rank preferred);
+  OCCUPIED / TRANSIENT advance to the next group; FATAL with no SUCCESS
+  sibling aborts remaining groups (auth presumed dead), but a parallel
+  SUCCESS in the same group overrides the FATAL. Time-major priority is
+  preserved (all 18:30 attempts finish before any 19:30 starts); facility
+  ordering within a timeslot is sacrificed. Do not reintroduce serial
+  submits — one hung rank-0 submit once locked out all its siblings.
+- **Double-booking inside a parallel group is accepted.** If two submits in
+  one group both SUCCEED, `book_via_http` logs a WARNING listing the surplus
+  booking for manual cancel. Deliberately no auto-cancel path (scope creep
+  for a case that has never occurred in contested windows).
+- **HTTP client timeout is 6s** (`PolyUHttpClient(timeout=6.0)`). Floor set
+  by the slowest observed legitimate SUCCESS submit (5.3s); ceiling bounds
+  the damage from PolyU-side hangs. Warm-pool cell-clicks run 150–300ms. If
+  a legitimate submit ever needs >6s, expect false TRANSIENTs and reopen.
+- **Submit result is decided from one response — no waiter race.** Location
+  header `make_book_result.do` ⇒ SUCCESS; "occupied" (case-insensitive) in
+  body or any `make_book*` redirect ⇒ OCCUPIED (the broad match covers a
+  known `302 → make_book.do` rebound that a narrow match misclassified as
+  FATAL); anything else ⇒ ERROR_*. `cell_click` and `submit` log body
+  diagnostics (status + Location + body_len + preview + markers) on every
+  ERROR_* so anomalies are root-causeable from CI logs alone.
+- **Password redaction.** All logging must go through
+  `src/log.py:build_logger` (filter replaces the password with `***` before
+  any handler) — no `print()`, no root logger. Playwright errors can quote
+  field values.
 - **Login verification.** After submitting credentials, `login()` checks the
-  URL still contains `loginhome` or that the username field is still present —
-  if so, raises `LoginFailed` distinctly so wrong-credentials show up as a
-  meaningful failure, not a downstream selector timeout.
+  URL still contains `loginhome` or the username field is still present and
+  raises `LoginFailed` — wrong credentials must not masquerade as a
+  downstream selector timeout.
+- **Exit codes drive notification.** Exit 0 = booked (silent). Exit 1 = no
+  slot or any error — GitHub emails the workflow owner on failure. There is
+  deliberately no success-notification path.
+- **Tests are offline.** Everything in `tests/` uses fakes (e.g.
+  `_FakeClient`) — no network, no Playwright. Don't add live integration
+  tests; verify with `--dry-run` against the real site.
+- **CI sets `TZ: Asia/Hong_Kong`** — `dates.py:now_hkt()` and the cron
+  comments assume it. Don't remove it from `.github/workflows/book.yml`.
 
-- **Predictive booking — no search on the hot path, parallel cell-clicks,
-  time-grouped parallel submits.**
-  PolyU's Search endpoint takes ~4.5s server-side, and during 2026-06-04's
-  run all desired slots were stolen inside that window. So `book_via_http`
-  fabricates `AvailableSlot`s from `(SLOT_PRIORITY × TENNIS_FACILITIES)`
-  and goes straight to `make_book.do` for each candidate. Phase 1 fires
-  all candidate cell_clicks via `asyncio.gather` so the "first-POST 5-6s
-  cold tax" no longer stacks across candidates (2026-06-07 and 2026-06-09
-  failures happened on a serial loop where 6s on the first POST burned
-  all four slots). Phase 2 groups ACCEPTED cells by `(start, end)` and
-  fires each group's submits in parallel via `asyncio.gather`; groups are
-  walked sequentially in priority order. **Time-major priority is
-  preserved** (all 18:30 attempts finish before any 19:30 attempt starts —
-  matches the user's "any court at 18:30 before 19:30" intent), but
-  facility ordering within a timeslot is sacrificed: rank 0 (Court 1) and
-  rank 1 (Court 2) race against each other. This replaced earlier serial-
-  submit logic that deadlocked on 2026-06-18 when rank 0 submit hung 10s
-  (ReadTimeout) and locked out rank 1/2/3. With parallel-within-group, a
-  hung rank 0 no longer blocks its siblings; the group `gather` resolves
-  in `max(latency)` not `sum(latency)`. Per-attempt latency is ~400ms
-  (cell-click) + ~400ms (submit on success). Cell-click OCCUPIED,
-  ERROR_TRANSIENT (5xx/network), and ERROR_FATAL (4xx/unknown shape) are
-  all **per-candidate**: a single FATAL cell-click does not abort the run.
-  Within a submit group: any SUCCESS wins (lowest rank preferred if
-  multiple — see double-booking note below); OCCUPIED / ERROR_TRANSIENT
-  advance to the next group; ERROR_FATAL with no SUCCESS sibling aborts
-  remaining groups (auth presumed dead), but a parallel SUCCESS in the
-  same group overrides the FATAL (auth is clearly alive). `cell_click`
-  and `submit` log body diagnostics (status + Location + body_len +
-  preview + marker substrings) on every ERROR_* so anomalies like
-  2026-06-09's `200 + empty Location` are root-causeable from CI logs
-  alone. Candidates for facility IDs that don't exist on the target date
-  return OCCUPIED via the same code path — semantics don't change, we
-  just waste one POST per nonexistent facility.
+## Maintenance hooks (when PolyU changes)
 
-- **Double-booking risk inside a parallel group is accepted.** If both
-  rank 0 (Court 1 @ 18:30) and rank 1 (Court 2 @ 18:30) submits return
-  SUCCESS at the same instant, we own two slots. Empirically this has
-  never happened in contested windows (slots are too scarce), but if it
-  does, `book_via_http` logs a WARNING listing the surplus booking so the
-  user can cancel manually. We deliberately don't auto-cancel — adding a
-  cancel-booking HTTP path is scope creep relative to how rare this is.
-
-- **HTTP client timeout is 6s.** `PolyUHttpClient(timeout=6.0)` bounds any
-  single request at 6 seconds. Floor is set by the slowest observed
-  legitimate SUCCESS submit (5.3s on 2026-06-16, rank 0); ceiling reduced
-  from the previous 10s to limit damage from PolyU hangs (2026-06-18's
-  10s ReadTimeout cost us all four slots). cell_click latencies on a
-  warm pool are 150-300ms so 6s leaves them untouched. If submit
-  legitimately needs > 6s in future, expect false TRANSIENTs and reopen.
-
-- **Submit success/failure detection is direct, no timeout.** With
-  Playwright we raced `wait_for_url` against `wait_for_selector("Facility
-  is occupied")` to avoid a 20s URL-waiter eating the rank-advance
-  budget. With HTTP, `submit` inspects the Submit response's Location
-  header: `make_book_result.do` ⇒ SUCCESS, "occupied" (case-insensitive)
-  in body or any `make_book*` redirect ⇒ OCCUPIED, anything else ⇒
-  ERROR_*. The broader `make_book` match (not just `make_book_submit`)
-  covers 2026-06-07's `302 → make_book.do` rebound which previously got
-  misclassified as FATAL and aborted the run. Result is decided in one
-  round-trip (~400ms) instead of a 20s waiter race.
-
-- **Password redaction.** `src/log.py:build_logger` installs a filter that
-  replaces the password string with `***` in log messages and args before any
-  handler sees them. Playwright errors can quote field values, so all logging
-  must go through this logger — don't `print()` or use the root logger.
-
-- **Artifacts.** The HTTP flow doesn't produce screenshots — the
-  request/response shapes are baked into `src/http_client.py` and tested
-  offline. For new live failures (e.g. PolyU UI changes), use
-  `scripts/capture_http.py` to grab a fresh HTTP trace under Playwright
-  (login + make_book.do navigation only, since the full booking flow no
-  longer needs Playwright). CI uploads any `artifacts/` content if
-  present, but the booker itself doesn't create files anymore.
-
-- **Dry-run stops before any cell-click.** `--dry-run --skip-sleep`
-  walks login + bootstrap_http_client, then `book_via_http` constructs
-  candidates and returns 0 before firing the `asyncio.gather` of
-  cell_clicks. It does NOT verify that PolyU still accepts our cell-click
-  POST shape — to live-test that, drop `dry_run`, set `SLOT_PRIORITY` to
-  a known-free off-peak window, and run before 08:30 HKT (the popular
-  slots are gone shortly after).
-
-- **Tests are offline.** All tests in `tests/` use fakes (e.g. `_FakeClient`
-  in `test_http_booker.py`) — no network, no Playwright launch. Don't add
-  live integration tests; verify changes by running `--dry-run` against the
-  real site locally and checking artifacts.
-
-- **CI sets `TZ: Asia/Hong_Kong`.** The workflow exports this so the runner's
-  wall clock matches HKT, which is what `dates.py:now_hkt()` and the cron
-  comments assume. Don't remove it from `.github/workflows/book.yml`.
+- **Selectors are externalized** in `src/config.py:Selectors`. Symptom:
+  `Selector ... is not configured` or a Playwright timeout on a specific
+  element. Fix: re-run `scripts/discover_selectors.py` (needs
+  POLYU_USERNAME/POLYU_PASSWORD), inspect `artifacts/*.html`, update the
+  dataclass. `require()` raises on any `PENDING_DISCOVERY` sentinel.
+- **HTTP request shapes are externalized** via `scripts/capture_http.py`,
+  which runs the flow under Playwright with request/response hooks and dumps
+  `artifacts/http_trace.json` (credentials redacted). Symptom:
+  `PolyUHttpClient` 4xxs or unexpected response shape. Fix: re-capture and
+  update the templates in `src/http_client.py`. Requires a known free
+  off-peak slot — see the script's header comment. CI uploads any
+  `artifacts/` content if present; the booker itself creates no files.
+- **Dry-run stops before any cell-click** — it verifies login + bootstrap
+  only, NOT that PolyU still accepts our cell-click POST shape. To live-test
+  that: drop `dry_run`, set `SLOT_PRIORITY` to a known-free off-peak window,
+  and run before 08:30 HKT.
 
 ## Tuning knobs
 
@@ -246,9 +160,3 @@ Add new rest weekdays to `_REST_WEEKDAYS`. For partial exclusions (some
 slots skipped but the day still booked), reintroduce a frozenset of
 `(start, end)` tuples and filter `SLOT_PRIORITY` against it in
 `slot_priority_for`.
-
-## Design docs
-
-Background and rationale live under `docs/superpowers/specs/` and
-`docs/superpowers/plans/` — read the most recent files there before
-substantive changes.
