@@ -39,8 +39,10 @@ off to `src/http_booker.py:book_via_http`. That orchestrator **skips search**
 and runs two phases over the `(SLOT_PRIORITY × TENNIS_FACILITIES)` candidate
 set: phase 1 fires every candidate's `cell_click()` concurrently via
 `asyncio.gather`; phase 2 groups ACCEPTED cells by `(start, end)` time-slot
-preserving rank order, fires each group's `submit()` concurrently, and walks
-groups sequentially in priority order. The client (`src/http_client.py`)
+preserving rank order, fires each group's `submit()` concurrently, and
+**staggers** the groups — group N+1 launches once the earlier groups settle or
+`SUBMIT_STAGGER_SECONDS` (2.5s) elapses, whichever is first. The winner is the
+lowest-rank SUCCESS across all groups. The client (`src/http_client.py`)
 issues the booking POSTs (make_book.do, make_book_submit.do) over raw httpx —
 no Playwright, no search on the hot path. (`PolyUHttpClient.search()` still
 exists for diagnostic use but isn't called in production.)
@@ -80,21 +82,40 @@ substantive changes.
   date just return OCCUPIED (one wasted POST, same code path).
 - **Parallel semantics.** Cell-click results (OCCUPIED / ERROR_TRANSIENT /
   ERROR_FATAL) are **per-candidate** — one FATAL does not abort the run.
-  Within a submit group: any SUCCESS wins (lowest rank preferred);
-  OCCUPIED / TRANSIENT advance to the next group; FATAL with no SUCCESS
-  sibling aborts remaining groups (auth presumed dead), but a parallel
-  SUCCESS in the same group overrides the FATAL. Time-major priority is
-  preserved (all 18:30 attempts finish before any 19:30 starts); facility
-  ordering within a timeslot is sacrificed. Do not reintroduce serial
-  submits — one hung rank-0 submit once locked out all its siblings.
-- **Double-booking inside a parallel group is accepted.** If two submits in
-  one group both SUCCEED, `book_via_http` logs a WARNING listing the surplus
-  booking for manual cancel. Deliberately no auto-cancel path (scope creep
-  for a case that has never occurred in contested windows).
-- **HTTP client timeout is 6s** (`PolyUHttpClient(timeout=6.0)`). Floor set
-  by the slowest observed legitimate SUCCESS submit (5.3s); ceiling bounds
-  the damage from PolyU-side hangs. Warm-pool cell-clicks run 150–300ms. If
-  a legitimate submit ever needs >6s, expect false TRANSIENTs and reopen.
+  Submits: any SUCCESS anywhere wins, and the winner is chosen **by rank**,
+  never by arrival order — groups overlap, so a fast 19:30 answer must not
+  beat a slower 18:30 one. Launching stops early if a settled group already
+  holds a SUCCESS (don't spend the daily quota on a fallback) or a FATAL with
+  no SUCCESS (auth presumed dead). A FATAL alongside a SUCCESS in another
+  group is just PolyU's quota page rejecting the surplus commit — expected,
+  not an error. Do not reintroduce serial submits or serial *groups*: one
+  hung rank-0 submit once locked out all its siblings, and strictly serial
+  groups cost 7 consecutive runs in 2026-08 (see below).
+- **Submit groups are staggered, never serialized** (`SUBMIT_STAGGER_SECONDS
+  = 2.5` in `http_booker.py`). Root cause of the 2026-08-19..2026-08-27
+  outage (7 lost runs, 1 win): every 18:30 submit hung past the 6s client
+  timeout, and because the 19:30 fallback only fired *after* that hang it was
+  always OCCUPIED by then. The stagger keeps 18:30 first into PolyU's queue
+  (dispatched ~2.3s earlier) while guaranteeing 19:30 still gets a live shot.
+  On a healthy day the 18:30 submit answers in ~3.8s, i.e. after the stagger,
+  so the 19:30 submits *do* fire and get quota-rejected — that WARNING is
+  expected noise, not a regression.
+- **Double-booking is prevented by PolyU, not by us.** Quota permits one
+  booking per day, so a surplus commit returns the quota page (observed
+  2026-08-29: rank 1 got it after rank 0 won). `book_via_http` still logs a
+  multi-SUCCESS WARNING listing surplus bookings for manual cancel, as a
+  belt-and-braces check if that quota rule ever changes. Deliberately no
+  auto-cancel path.
+- **Two timeout budgets, not one** (`PolyUHttpClient(timeout=6.0,
+  submit_timeout=20.0)`). `timeout` guards cell_click/warmup — those run
+  150–300ms warm and are all gathered together, so one hang stalls the whole
+  submit phase. `submit_timeout` guards `make_book_submit.do`, which does the
+  real transactional work and legitimately takes 4–6s+ at 08:30; connect
+  stays on the short budget since the pool is already warm. A single shared
+  6s budget sat in the middle of the submit latency distribution and killed
+  every contested booking. Aborting a submit rolls it back server-side
+  (confirmed: none of the 7 timed-out days produced a court), so waiting is
+  strictly better than giving up.
 - **Submit result is decided from one response — no waiter race.** Location
   header `make_book_result.do` ⇒ SUCCESS; "occupied" (case-insensitive) in
   body or any `make_book*` redirect ⇒ OCCUPIED (the broad match covers a

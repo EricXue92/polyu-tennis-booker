@@ -184,14 +184,30 @@ class PolyUHttpClient:
         csrf_token: str,
         fb_user_id: str,
         timeout: float = 6.0,
+        submit_timeout: float = 20.0,
     ) -> None:
-        # 6s upper bound on any single request. The slowest observed legitimate
-        # SUCCESS submit was 5.3s (2026-06-16, rank 0); 6s gives small margin
-        # over that while bounding ReadTimeout disasters like 2026-06-18
-        # (10s wait poisoned the whole strict-priority chain). cell_click
-        # latencies on warm pool are 150-300ms so this doesn't squeeze them.
+        # Two budgets, because the two hot-path POSTs behave nothing alike.
+        #
+        # `timeout` (6s) guards cell_click and warmup. Those run 150-300ms on
+        # the warm pool, and every candidate's cell_click is gathered together,
+        # so one hung cell_click stalls the entire submit phase behind it.
+        #
+        # `submit_timeout` (20s) guards make_book_submit.do, which does the
+        # real transactional work and legitimately takes 4-6s+ at 08:30. The
+        # old shared 6s budget sat in the middle of that distribution and cost
+        # us 7 consecutive runs (2026-08-19..2026-08-27): every 18:30 submit
+        # died on ReadTimeout without ever returning SUCCESS or OCCUPIED, while
+        # the single win in that window answered at 3.79s. Aborting the request
+        # rolls the booking back server-side (confirmed: none of those days
+        # produced a court), so waiting is strictly better than giving up.
+        # A long budget no longer starves the lower-priority fallback — the
+        # orchestrator staggers groups instead of serializing them, see
+        # src/http_booker.py:SUBMIT_STAGGER_SECONDS.
         self.csrf_token = csrf_token
         self.fb_user_id = fb_user_id
+        # Connect stays on the short budget: at 08:30 the pool is already warm,
+        # so a slow handshake means something is wrong, not that we're queued.
+        self._submit_timeout = httpx.Timeout(submit_timeout, connect=timeout)
         self._http = httpx.AsyncClient(
             cookies=cookies,
             headers=_DEFAULT_HEADERS,
@@ -475,6 +491,7 @@ class PolyUHttpClient:
             resp = await self._http.post(
                 MAKE_BOOK_SUBMIT_URL,
                 files=multipart_files,
+                timeout=self._submit_timeout,
                 headers={
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     "Origin": _ORIGIN,

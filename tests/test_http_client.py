@@ -792,3 +792,70 @@ async def test_cell_click_sends_correct_form_and_headers():
     assert "make_book.do" in headers.get("referer", "")
     assert "make_book_submit" not in headers.get("referer", "")
     assert headers.get("upgrade-insecure-requests") == "1"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_submit_uses_longer_read_timeout_than_default():
+    # Regression for 2026-08-19..2026-08-27 (7 consecutive lost runs): every
+    # 18:30 submit died on a 6.0s ReadTimeout, never returning SUCCESS or
+    # OCCUPIED. make_book_submit.do legitimately takes 4-6s+ at 08:30 (the one
+    # win in that window answered at 3.79s), so submit needs its own, longer
+    # read budget than the short one that guards cell_click.
+    from src.http_client import PolyUHttpClient
+
+    captured = {}
+
+    def record(request):
+        captured["timeout"] = request.extensions.get("timeout")
+        return Response(302, headers={
+            "location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_result.do",
+        })
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+    ).mock(side_effect=record)
+
+    client = PolyUHttpClient(
+        cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1",
+        timeout=6.0, submit_timeout=20.0,
+    )
+    try:
+        await client.submit(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert captured["timeout"]["read"] == 20.0
+    # Connect stays on the short budget: the pool is already warm at 08:30, so
+    # a slow handshake means something is wrong and we should not wait 20s.
+    assert captured["timeout"]["connect"] == 6.0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_cell_click_keeps_the_short_default_timeout():
+    # cell_click runs 150-300ms on the warm pool and all candidates are
+    # gathered together, so one hung cell_click stalls the whole submit phase.
+    # It must NOT inherit submit's long budget.
+    from src.http_client import PolyUHttpClient
+
+    captured = {}
+
+    def record(request):
+        captured["timeout"] = request.extensions.get("timeout")
+        return Response(302, headers={
+            "location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do",
+        })
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+    ).mock(side_effect=record)
+
+    client = PolyUHttpClient(
+        cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1",
+        timeout=6.0, submit_timeout=20.0,
+    )
+    try:
+        await client.cell_click(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert captured["timeout"]["read"] == 6.0

@@ -315,10 +315,11 @@ async def test_submits_within_timeslot_run_in_parallel():
 
 
 @pytest.mark.asyncio
-async def test_groups_run_sequentially():
-    # All ACCEPTED. 18:30 group: both OCCUPIED with 200ms delay.
-    # 19:30 group: rank 2 SUCCESS. 19:30 submits must not start until 18:30
-    # submits have returned — otherwise we'd race across the priority boundary.
+async def test_next_group_waits_when_previous_answers_within_stagger():
+    # All ACCEPTED. 18:30 group: both OCCUPIED with 200ms delay — well inside
+    # the stagger. 19:30 group: rank 2 SUCCESS. When the higher-priority group
+    # answers promptly the next group must wait for it rather than racing
+    # across the priority boundary; the stagger is a ceiling, not a delay.
     from src.http_booker import book_via_http
 
     client = _FakeClient(
@@ -373,3 +374,80 @@ async def test_dry_run_does_not_call_cell_click_or_submit():
     assert rc == 0
     assert client.cell_click_calls == []
     assert client.submit_calls == []
+
+
+@pytest.mark.asyncio
+async def test_hung_group_does_not_delay_next_group_past_stagger():
+    # Regression for 2026-08-19..2026-08-27 (7 consecutive lost runs). Both
+    # 18:30 submits hung past the client timeout; because groups were strictly
+    # serial, the 19:30 fallback only fired after that full hang and came back
+    # OCCUPIED every time. The next group must now launch once the stagger
+    # elapses, without waiting for the hung group to settle.
+    from src.http_booker import book_via_http
+
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results={**_all_submit(BookingResult.OCCUPIED),
+                        (19, _FACILITY_IDS[0]): BookingResult.SUCCESS},
+        submit_sleeps={(18, _FACILITY_IDS[0]): 1.0,
+                       (18, _FACILITY_IDS[1]): 1.0},
+    )
+    rc = await book_via_http(
+        client, date(2026, 6, 10), _PRIORITY, dry_run=False, log=_LOG, stagger_s=0.1
+    )
+    assert rc == 0
+    assert len(client.submit_calls) == 4
+    gap = client.submit_call_times[2] - client.submit_call_times[0]
+    assert 0.1 <= gap < 0.6, (
+        f"19:30 group launched {gap*1000:.0f}ms after 18:30 — expected ~100ms "
+        f"(the stagger), not ~1000ms (the hung group's full duration)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_slow_first_group_success_beats_fast_second_group_success(caplog):
+    # Both groups are in flight at once, so results no longer arrive in
+    # priority order. The 19:30 SUCCESS lands first, but 18:30 is what the
+    # user actually wants: the winner must be chosen by rank, not by
+    # who answered first.
+    from src.http_booker import book_via_http
+
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results={**_all_submit(BookingResult.OCCUPIED),
+                        (18, _FACILITY_IDS[0]): BookingResult.SUCCESS,
+                        (19, _FACILITY_IDS[0]): BookingResult.SUCCESS},
+        submit_sleeps={(18, _FACILITY_IDS[0]): 0.4,
+                       (18, _FACILITY_IDS[1]): 0.4},
+    )
+    with caplog.at_level(logging.INFO):
+        rc = await book_via_http(
+            client, date(2026, 6, 10), _PRIORITY, dry_run=False, log=_LOG, stagger_s=0.1
+        )
+    assert rc == 0
+    assert len(client.submit_calls) == 4
+    booked = [r.getMessage() for r in caplog.records
+              if r.getMessage().startswith("done: booked")]
+    assert booked == ["done: booked Tennis Court No. 1 @ 18:30 (rank=0)"], caplog.text
+
+
+@pytest.mark.asyncio
+async def test_success_in_later_group_survives_fatal_in_earlier_group():
+    # With groups overlapping, an in-flight 18:30 FATAL (e.g. PolyU's quota
+    # page) must not discard a real 19:30 booking that already committed.
+    # Only a FATAL with no SUCCESS anywhere is fatal to the run.
+    from src.http_booker import book_via_http
+
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results={**_all_submit(BookingResult.SUCCESS),
+                        (18, _FACILITY_IDS[0]): BookingResult.ERROR_FATAL,
+                        (18, _FACILITY_IDS[1]): BookingResult.ERROR_FATAL},
+        submit_sleeps={(18, _FACILITY_IDS[0]): 0.4,
+                       (18, _FACILITY_IDS[1]): 0.4},
+    )
+    rc = await book_via_http(
+        client, date(2026, 6, 10), _PRIORITY, dry_run=False, log=_LOG, stagger_s=0.1
+    )
+    assert rc == 0
+    assert len(client.submit_calls) == 4
