@@ -511,6 +511,13 @@ class PolyUHttpClient:
         if resp.status_code in (200, 302) and (
             "occupied" in body.lower() or "make_book" in location
         ):
+            # OCCUPIED covers two shapes ("occupied" in body vs. 302 rebound to
+            # make_book*); log which one so contested runs (e.g. 2026-08-28,
+            # 4/4 OCCUPIED) are distinguishable from CI logs alone.
+            _LOG.info(
+                "submit occupied (status=%d, location=%r, body_len=%d, markers=%s)",
+                resp.status_code, location, len(body), _diag_markers(body),
+            )
             return BookingResult.OCCUPIED
         err = _classify_http_error(resp.status_code)
         _LOG.warning(

@@ -559,6 +559,37 @@ async def test_submit_returns_occupied_on_body_case_insensitive():
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_submit_logs_diagnostics_on_occupied(caplog):
+    # 2026-08-28: all 4 submits came back OCCUPIED but the logs could not
+    # distinguish "body says occupied" from "302 rebound to make_book.do".
+    # OCCUPIED now logs the same status/location/body diagnostics as ERROR_*.
+    from src.http_client import PolyUHttpClient, BookingResult
+    import logging
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+    ).mock(return_value=Response(
+        302,
+        headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"},
+    ))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        with caplog.at_level(logging.INFO, logger="booker"):
+            result = await client.submit(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert result is BookingResult.OCCUPIED
+    rec = [r for r in caplog.records if "submit occupied" in r.message]
+    assert rec, "expected a submit occupied INFO line with diagnostics"
+    msg = rec[0].message
+    assert "status=302" in msg
+    assert "location=" in msg
+    assert "body_len=" in msg
+    assert "markers=" in msg
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_submit_returns_transient_on_5xx():
     from src.http_client import PolyUHttpClient, BookingResult
 
