@@ -88,17 +88,17 @@ substantive changes.
   holds a SUCCESS (don't spend the daily quota on a fallback) or a FATAL with
   no SUCCESS (auth presumed dead). A FATAL alongside a SUCCESS in another
   group is just PolyU's quota page rejecting the surplus commit — expected,
-  not an error. Do not reintroduce serial submits or serial *groups*: one
+  not an error. Do not reintroduce serial submits or serial _groups_: one
   hung rank-0 submit once locked out all its siblings, and strictly serial
   groups cost 7 consecutive runs in 2026-08 (see below).
 - **Submit groups are staggered, never serialized** (`SUBMIT_STAGGER_SECONDS
-  = 2.5` in `http_booker.py`). Root cause of the 2026-08-19..2026-08-27
+= 2.5` in `http_booker.py`). Root cause of the 2026-08-19..2026-08-27
   outage (7 lost runs, 1 win): every 18:30 submit hung past the 6s client
-  timeout, and because the 19:30 fallback only fired *after* that hang it was
+  timeout, and because the 19:30 fallback only fired _after_ that hang it was
   always OCCUPIED by then. The stagger keeps 18:30 first into PolyU's queue
   (dispatched ~2.3s earlier) while guaranteeing 19:30 still gets a live shot.
   On a healthy day the 18:30 submit answers in ~3.8s, i.e. after the stagger,
-  so the 19:30 submits *do* fire and get quota-rejected — that WARNING is
+  so the 19:30 submits _do_ fire and get quota-rejected — that WARNING is
   expected noise, not a regression.
 - **Double-booking is prevented by PolyU, not by us.** Quota permits one
   booking per day, so a surplus commit returns the quota page (observed
@@ -107,7 +107,7 @@ substantive changes.
   belt-and-braces check if that quota rule ever changes. Deliberately no
   auto-cancel path.
 - **Two timeout budgets, not one** (`PolyUHttpClient(timeout=6.0,
-  submit_timeout=20.0)`). `timeout` guards cell_click/warmup — those run
+submit_timeout=20.0)`). `timeout` guards cell_click/warmup — those run
   150–300ms warm and are all gathered together, so one hang stalls the whole
   submit phase. `submit_timeout` guards `make_book_submit.do`, which does the
   real transactional work and legitimately takes 4–6s+ at 08:30; connect
@@ -120,9 +120,9 @@ substantive changes.
   header `make_book_result.do` ⇒ SUCCESS; "occupied" (case-insensitive) in
   body or any `make_book*` redirect ⇒ OCCUPIED (the broad match covers a
   known `302 → make_book.do` rebound that a narrow match misclassified as
-  FATAL); anything else ⇒ ERROR_*. `cell_click` and `submit` log body
+  FATAL); anything else ⇒ ERROR__. `cell_click` and `submit` log body
   diagnostics (status + Location + body_len + preview + markers) on every
-  ERROR_* so anomalies are root-causeable from CI logs alone.
+  ERROR__ so anomalies are root-causeable from CI logs alone.
 - **Password redaction.** All logging must go through
   `src/log.py:build_logger` (filter replaces the password with `***` before
   any handler) — no `print()`, no root logger. Playwright errors can quote
@@ -165,9 +165,9 @@ substantive changes.
 - Trigger time: `TRIGGER_TIME_HKT` in `src/config.py`.
 - Days-ahead window: `DAYS_AHEAD` in `src/dates.py`.
 
-## Weekday-specific exclusions
+## Weekday-specific adjustments
 
-`config.slot_priority_for(target_date)` filters `SLOT_PRIORITY` per weekday
+`config.slot_priority_for(target_date)` adjusts `SLOT_PRIORITY` per weekday
 before sessions are created. When it returns an empty tuple, `run()`
 short-circuits with exit 0 (no sleep, no Playwright launch) — the watchdog
 treats the day as accounted for and does not open an issue. Currently:
@@ -176,6 +176,10 @@ treats the day as accounted for and does not open an issue. Currently:
   `_REST_WEEKDAYS`, so Tuesday-target runs skip booking entirely. (The
   18:30-20:30 cells are staff-reserved anyway, and the remaining slots
   aren't wanted.)
+- **Weekends add late-evening fallbacks.** Saturday/Sunday targets append
+  `_WEEKEND_EXTRA_SLOTS` (20:30-21:30, 21:30-22:30) after `SLOT_PRIORITY`,
+  giving 4 time-slots × 2 courts = 8 candidates instead of 4. Rank order
+  still prefers 18:30/19:30.
 
 Add new rest weekdays to `_REST_WEEKDAYS`. For partial exclusions (some
 slots skipped but the day still booked), reintroduce a frozenset of

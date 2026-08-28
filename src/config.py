@@ -43,14 +43,25 @@ SLOT_PRIORITY: tuple[tuple[time, time], ...] = (
 # so the booker short-circuits to a no-op success when target_date is Tuesday.
 _REST_WEEKDAYS: frozenset[int] = frozenset({1})  # Mon=0, Tue=1, ...
 
+# On weekends, also try the late-evening slots as lower-priority fallbacks
+# (appended after SLOT_PRIORITY, so 18:30/19:30 still win by rank).
+_WEEKEND_WEEKDAYS: frozenset[int] = frozenset({5, 6})  # Sat=5, Sun=6
+_WEEKEND_EXTRA_SLOTS: tuple[tuple[time, time], ...] = (
+    (time(20, 30), time(21, 30)),
+    (time(21, 30), time(22, 30)),
+)
+
 
 def slot_priority_for(target_date: date) -> tuple[tuple[time, time], ...]:
-    """Return SLOT_PRIORITY with weekday-specific exclusions applied.
+    """Return SLOT_PRIORITY with weekday-specific adjustments applied.
 
-    Returns an empty tuple on rest weekdays so the booker can skip the run.
+    Returns an empty tuple on rest weekdays so the booker can skip the run;
+    appends _WEEKEND_EXTRA_SLOTS on Saturdays and Sundays.
     """
     if target_date.weekday() in _REST_WEEKDAYS:
         return ()
+    if target_date.weekday() in _WEEKEND_WEEKDAYS:
+        return SLOT_PRIORITY + _WEEKEND_EXTRA_SLOTS
     return SLOT_PRIORITY
 
 TRIGGER_TIME_HKT = time(8, 30, 0)
