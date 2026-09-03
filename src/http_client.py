@@ -148,10 +148,10 @@ _DEFAULT_HEADERS = {
 }
 
 _REFERER_MAKE_BOOK = (
-    "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+    "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"
 )
 _REFERER_MAKE_BOOK_SUBMIT = (
-    "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+    "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do"
 )
 _ORIGIN = "https://www40.polyu.edu.hk"
 

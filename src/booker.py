@@ -72,7 +72,7 @@ async def bootstrap_http_client(page, *, log: logging.Logger):
     redirect, unexpected error page).
 
     Path-scoped cookies are preserved: PolyU runs two J2EE apps on the same
-    host (`/poss` login + `/starspossfbstud` booking), each with its own
+    host (`/possns` login + `/starspossfbns` booking), each with its own
     path-scoped JSESSIONID. Collapsing them by name would silently send the
     wrong one and produce a 403 with a fresh anonymous session.
     """

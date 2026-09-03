@@ -13,7 +13,7 @@ def test_parse_csrf_token_extracts_from_js_url():
         $.ajax({
             type: "POST",
             dataType: "json",
-            url: "/starspossfbstud/secure/menu_click_fctn.json?CSRFToken=0cd6a396-5498-4d05-a3f8-a6fefaa2f9ea",
+            url: "/starspossfbns/secure/menu_click_fctn.json?CSRFToken=0cd6a396-5498-4d05-a3f8-a6fefaa2f9ea",
             data: {fctnCode: $(ptr).data('fctncode')}
         });
     </script>
@@ -138,7 +138,7 @@ async def test_search_returns_free_slots_grouped_by_time():
     from src.http_client import PolyUHttpClient, AvailableSlot
 
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/timetable.json"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/timetable.json"
     ).mock(return_value=Response(200, text=_load_timetable_fixture()))
 
     client = PolyUHttpClient(
@@ -181,7 +181,7 @@ async def test_search_sends_correct_form_body():
         return Response(200, text=_load_timetable_fixture())
 
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/timetable.json"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/timetable.json"
     ).mock(side_effect=record_and_respond)
 
     client = PolyUHttpClient(
@@ -267,7 +267,7 @@ async def test_search_sends_ajax_headers():
         return Response(200, text=_load_timetable_fixture())
 
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/timetable.json"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/timetable.json"
     ).mock(side_effect=record)
 
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
@@ -331,10 +331,10 @@ async def test_cell_click_returns_accepted_on_redirect_to_submit():
     from src.http_client import PolyUHttpClient, CellOutcome
 
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"
     ).mock(return_value=Response(
         302,
-        headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"},
+        headers={"location": "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do"},
     ))
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
     try:
@@ -353,10 +353,10 @@ async def test_cell_click_returns_occupied_on_redirect_back_to_make_book():
     from src.http_client import PolyUHttpClient, CellOutcome
 
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"
     ).mock(return_value=Response(
         302,
-        headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"},
+        headers={"location": "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"},
     ))
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
     try:
@@ -374,7 +374,7 @@ async def test_cell_click_returns_occupied_on_lowercase_occupied_body():
     from src.http_client import PolyUHttpClient, CellOutcome
 
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"
     ).mock(return_value=Response(
         200, text="<html><body>this slot is OCCUPIED already</body></html>",
     ))
@@ -392,7 +392,7 @@ async def test_cell_click_returns_transient_on_5xx():
     from src.http_client import PolyUHttpClient, CellOutcome
 
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"
     ).mock(return_value=Response(503, text="Service Unavailable"))
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
     try:
@@ -408,7 +408,7 @@ async def test_cell_click_returns_fatal_on_4xx():
     from src.http_client import PolyUHttpClient, CellOutcome
 
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"
     ).mock(return_value=Response(403, text="Forbidden"))
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
     try:
@@ -425,7 +425,7 @@ async def test_cell_click_returns_transient_on_network_error():
     from src.http_client import PolyUHttpClient, CellOutcome
 
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"
     ).mock(side_effect=httpx.ConnectError("boom"))
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
     try:
@@ -443,7 +443,7 @@ async def test_cell_click_logs_diagnostics_on_error_fatal(caplog):
     import logging
 
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"
     ).mock(return_value=Response(200, text="<html>nothing recognisable</html>"))
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
     try:
@@ -466,10 +466,10 @@ async def test_cell_click_accepted_wins_over_occupied_body_on_submit_redirect():
     # ACCEPTED takes priority even if body contains "occupied" — branch order matters.
     from src.http_client import PolyUHttpClient, CellOutcome
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"
     ).mock(return_value=Response(
         302,
-        headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"},
+        headers={"location": "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do"},
         text="<html>occupied notice</html>",
     ))
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
@@ -486,10 +486,10 @@ async def test_submit_returns_success_on_make_book_result_redirect():
     from src.http_client import PolyUHttpClient, BookingResult
 
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do"
     ).mock(return_value=Response(
         302,
-        headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_result.do"},
+        headers={"location": "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_result.do"},
     ))
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
     try:
@@ -508,10 +508,10 @@ async def test_submit_returns_occupied_on_redirect_to_make_book_do():
     from src.http_client import PolyUHttpClient, BookingResult
 
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do"
     ).mock(return_value=Response(
         302,
-        headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"},
+        headers={"location": "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"},
     ))
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
     try:
@@ -528,10 +528,10 @@ async def test_submit_returns_occupied_on_redirect_back_to_submit():
     from src.http_client import PolyUHttpClient, BookingResult
 
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do"
     ).mock(return_value=Response(
         302,
-        headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"},
+        headers={"location": "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do"},
     ))
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
     try:
@@ -547,7 +547,7 @@ async def test_submit_returns_occupied_on_body_case_insensitive():
     from src.http_client import PolyUHttpClient, BookingResult
 
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do"
     ).mock(return_value=Response(200, text="<html>OCCUPIED!!!</html>"))
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
     try:
@@ -567,10 +567,10 @@ async def test_submit_logs_diagnostics_on_occupied(caplog):
     import logging
 
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do"
     ).mock(return_value=Response(
         302,
-        headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"},
+        headers={"location": "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"},
     ))
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
     try:
@@ -594,7 +594,7 @@ async def test_submit_returns_transient_on_5xx():
     from src.http_client import PolyUHttpClient, BookingResult
 
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do"
     ).mock(return_value=Response(503, text="Service Unavailable"))
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
     try:
@@ -610,7 +610,7 @@ async def test_submit_returns_fatal_on_4xx():
     from src.http_client import PolyUHttpClient, BookingResult
 
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do"
     ).mock(return_value=Response(403, text="Forbidden"))
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
     try:
@@ -629,7 +629,7 @@ async def test_submit_returns_fatal_on_unknown_shape_with_diagnostics(caplog):
     import logging
 
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do"
     ).mock(return_value=Response(200, text="<html>weird page no banner</html>"))
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
     try:
@@ -652,7 +652,7 @@ async def test_submit_returns_transient_on_network_error():
     import httpx
     from src.http_client import PolyUHttpClient, BookingResult
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do"
     ).mock(side_effect=httpx.ConnectError("boom"))
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
     try:
@@ -671,10 +671,10 @@ async def test_submit_sends_multipart_with_csrf_and_declare():
     def record(request):
         captured["body"] = request.content.decode("utf-8", errors="replace")
         captured["ct"] = request.headers.get("content-type", "")
-        return Response(302, headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_result.do"})
+        return Response(302, headers={"location": "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_result.do"})
 
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do"
     ).mock(side_effect=record)
 
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="tok-S", fb_user_id="432567")
@@ -694,7 +694,7 @@ async def test_warmup_fires_n_concurrent_gets():
     from src.http_client import PolyUHttpClient
 
     route = respx.get(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"
     ).mock(return_value=Response(200, text="<html>ok</html>"))
 
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
@@ -713,7 +713,7 @@ async def test_warmup_default_n_is_1():
     from src.http_client import PolyUHttpClient
 
     route = respx.get(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"
     ).mock(return_value=Response(200, text="<html>ok</html>"))
 
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
@@ -732,7 +732,7 @@ async def test_warmup_returns_negative_one_per_failed_get():
     from src.http_client import PolyUHttpClient
 
     respx.get(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"
     ).mock(side_effect=httpx.ConnectError("boom"))
 
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
@@ -768,7 +768,7 @@ async def test_warmup_n_fires_concurrently_not_serially():
         return Response(200, text="ok")
 
     respx.get(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"
     ).mock(side_effect=_slow_mock)
 
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
@@ -796,10 +796,10 @@ async def test_cell_click_sends_correct_form_and_headers():
         captured["headers"] = dict(request.headers)
         return Response(
             302,
-            headers={"location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"},
+            headers={"location": "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do"},
         )
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"
     ).mock(side_effect=record)
 
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="tok-Z", fb_user_id="432567")
@@ -840,11 +840,11 @@ async def test_submit_uses_longer_read_timeout_than_default():
     def record(request):
         captured["timeout"] = request.extensions.get("timeout")
         return Response(302, headers={
-            "location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_result.do",
+            "location": "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_result.do",
         })
 
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do"
     ).mock(side_effect=record)
 
     client = PolyUHttpClient(
@@ -874,11 +874,11 @@ async def test_cell_click_keeps_the_short_default_timeout():
     def record(request):
         captured["timeout"] = request.extensions.get("timeout")
         return Response(302, headers={
-            "location": "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do",
+            "location": "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do",
         })
 
     respx.post(
-        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"
     ).mock(side_effect=record)
 
     client = PolyUHttpClient(

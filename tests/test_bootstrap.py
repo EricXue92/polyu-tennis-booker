@@ -34,7 +34,7 @@ async def test_bootstrap_extracts_session_state_from_post_login_page():
     page = _FakePage(
         html=_FIXTURE_HTML,
         cookies=[
-            {"name": "JSESSIONID", "value": "abc123", "domain": "www40.polyu.edu.hk", "path": "/starspossfbstud"},
+            {"name": "JSESSIONID", "value": "abc123", "domain": "www40.polyu.edu.hk", "path": "/starspossfbns"},
             {"name": "AWSALB", "value": "lb-token", "domain": "www40.polyu.edu.hk", "path": "/"},
             # A cookie from an unrelated domain — must be filtered out.
             {"name": "ga", "value": "tracking", "domain": "google-analytics.com", "path": "/"},
@@ -74,18 +74,18 @@ async def test_bootstrap_raises_when_html_is_unexpected():
 
 @pytest.mark.asyncio
 async def test_bootstrap_preserves_path_scoped_duplicates():
-    """PolyU has two JSESSIONIDs (Path=/poss anonymous + Path=/starspossfbstud
+    """PolyU has two JSESSIONIDs (Path=/possns anonymous + Path=/starspossfbns
     authenticated). The bootstrap helper must keep BOTH so httpx sends the
-    right one to /starspossfbstud/* endpoints — collapsing by name causes 403."""
+    right one to /starspossfbns/* endpoints — collapsing by name causes 403."""
     from src.booker import bootstrap_http_client
 
     page = _FakePage(
         html=_FIXTURE_HTML,
         cookies=[
             {"name": "JSESSIONID", "value": "ANON",
-             "domain": "www40.polyu.edu.hk", "path": "/poss"},
+             "domain": "www40.polyu.edu.hk", "path": "/possns"},
             {"name": "JSESSIONID", "value": "AUTH",
-             "domain": "www40.polyu.edu.hk", "path": "/starspossfbstud"},
+             "domain": "www40.polyu.edu.hk", "path": "/starspossfbns"},
             {"name": "LtpaToken2", "value": "sso",
              "domain": "www40.polyu.edu.hk", "path": "/"},
         ],
@@ -97,8 +97,8 @@ async def test_bootstrap_preserves_path_scoped_duplicates():
         # The httpx cookie jar should hold both JSESSIONIDs.
         jar = client._http.cookies
         # Use path-scoped get to verify both survive.
-        auth = jar.get("JSESSIONID", path="/starspossfbstud")
-        anon = jar.get("JSESSIONID", path="/poss")
+        auth = jar.get("JSESSIONID", path="/starspossfbns")
+        anon = jar.get("JSESSIONID", path="/possns")
         assert auth == "AUTH"
         assert anon == "ANON"
     finally:

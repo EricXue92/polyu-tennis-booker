@@ -9,8 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, time
 
-LOGIN_URL = "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
-SUBMIT_URL = "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
+LOGIN_URL = "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"
+SUBMIT_URL = "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do"
 
 # --- Tennis activity HTTP-API constants (derived from artifacts/http_trace.json) ---
 # These are the form-field values PolyU's booking POSTs require for the Tennis
@@ -18,10 +18,10 @@ SUBMIT_URL = "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/mak
 # unchanged for the lifetime of PolyU's current booking system. Re-confirm by
 # running scripts/capture_http.py if a booking starts failing with 4xx/5xx.
 
-TIMETABLE_URL = "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/timetable.json"
-MAKE_BOOK_URL = "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book.do"
-MAKE_BOOK_SUBMIT_URL = "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_submit.do"
-MAKE_BOOK_RESULT_URL = "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_make_book/make_book_result.do"
+TIMETABLE_URL = "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/timetable.json"
+MAKE_BOOK_URL = "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"
+MAKE_BOOK_SUBMIT_URL = "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do"
+MAKE_BOOK_RESULT_URL = "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_result.do"
 
 TENNIS_DATA_SET_ID = 18
 TENNIS_ACTV_ID = 10
@@ -38,8 +38,7 @@ SLOT_PRIORITY: tuple[tuple[time, time], ...] = (
     (time(19, 30), time(20, 30)),
 )
 
-# Tuesdays are a rest day — no court is booked at all. Tuesday 18:30-20:30
-# is staff-reserved anyway, and the remaining priority slots aren't wanted,
+# Tuesdays are a rest day — no court is booked at all (owner's preference),
 # so the booker short-circuits to a no-op success when target_date is Tuesday.
 _REST_WEEKDAYS: frozenset[int] = frozenset({1})  # Mon=0, Tue=1, ...
 

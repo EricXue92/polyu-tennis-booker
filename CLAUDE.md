@@ -173,9 +173,8 @@ short-circuits with exit 0 (no sleep, no Playwright launch) — the watchdog
 treats the day as accounted for and does not open an issue. Currently:
 
 - **Tuesday is a rest day.** `target_date.weekday() == 1` is in
-  `_REST_WEEKDAYS`, so Tuesday-target runs skip booking entirely. (The
-  18:30-20:30 cells are staff-reserved anyway, and the remaining slots
-  aren't wanted.)
+  `_REST_WEEKDAYS`, so Tuesday-target runs skip booking entirely (owner's
+  preference).
 - **Weekends add late-evening fallbacks.** Saturday/Sunday targets append
   `_WEEKEND_EXTRA_SLOTS` (20:30-21:30, 21:30-22:30) after `SLOT_PRIORITY`,
   giving 4 time-slots × 2 courts = 8 candidates instead of 4. Rank order
