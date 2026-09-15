@@ -16,7 +16,7 @@ uv run playwright install chromium        # one-time browser install
 uv run pytest                             # run all unit tests (offline, no network/browser)
 uv run pytest tests/test_http_booker.py::test_happy_path_rank0_wins
 uv run book-tennis --dry-run --skip-sleep # local end-to-end (needs POLYU_USERNAME/POLYU_PASSWORD)
-uv run book-tennis --dry-run --skip-sleep --target-date 2026-09-18  # exercise a date-specific rule
+uv run book-tennis --dry-run --skip-sleep --target-date 2026-09-19  # exercise a weekend (dual-account) rule
 ```
 
 Manual workflow trigger (use after watchdog issue, or to test on a branch):
@@ -24,7 +24,7 @@ Manual workflow trigger (use after watchdog issue, or to test on a branch):
 ```bash
 gh workflow run "Daily Tennis Booking" -f dry_run=false -f skip_sleep=true
 gh workflow run "Daily Tennis Booking" --ref <branch> -f ...   # CF Worker only triggers main; use --ref for branch tests
-gh workflow run "Daily Tennis Booking" -f dry_run=true -f skip_sleep=true -f target_date=2026-09-18  # verify a specific target date
+gh workflow run "Daily Tennis Booking" -f dry_run=true -f skip_sleep=true -f target_date=2026-09-19  # verify a specific target date
 gh run watch <id> --interval 15 --exit-status                  # block until done
 ```
 
@@ -69,12 +69,14 @@ headers from it — never hardcode a context root in the client.
 - **Staff account** (`POLYU_USERNAME`/`POLYU_PASSWORD`): the daily booker,
   rule `slot_priority_for` (see weekday adjustments below).
 - **Student account** (`POLYU_STUDENT_USERNAME`/`POLYU_STUDENT_PASSWORD`):
-  one-off, books ONLY when the target date is in `STUDENT_TARGET_DATES`
-  (currently 2026-09-18, 19, 20), trying 18:30 → 19:30 → 20:30 → 21:30 on
-  both courts. Both accounts fire at 08:30 together and compete with each
-  other for the same two courts; PolyU's first-come-first-served decides.
-  After the dates pass, empty the set (or remove the account) — nothing
-  else needs to change.
+  weekends only, rule `student_slot_priority_for`. The owner wants two
+  consecutive hours on Saturdays/Sundays, one hour per account, so the two
+  accounts split the evening by parity: staff takes the **even** hours
+  (18:30 → 20:30), student the **odd** hours (17:30 → 19:30 → 21:30), both
+  on both courts. Both fire at 08:30 together and cannot see each other's
+  result, so this static split is the only thing preventing overlap — never
+  give either account a weekend fallback on the other's hours. Any outcome
+  pair is non-overlapping; every pair except (18:30, 21:30) is adjacent.
 - **Per-account isolation.** A failed login or a crash in one account is
   logged and the other account still books; the run exits 1 afterwards so
   the owner is emailed. Each account logs through its own
@@ -205,10 +207,11 @@ treats the day as accounted for and does not open an issue. Currently:
 - **Tuesday is a rest day.** `target_date.weekday() == 1` is in
   `_REST_WEEKDAYS`, so Tuesday-target runs skip booking entirely (owner's
   preference).
-- **Weekends add late-evening fallbacks.** Saturday/Sunday targets append
-  `_WEEKEND_EXTRA_SLOTS` (20:30-21:30, 21:30-22:30) after `SLOT_PRIORITY`,
-  giving 4 time-slots × 2 courts = 8 candidates instead of 4. Rank order
-  still prefers 18:30/19:30.
+- **Weekends split hours between the two accounts.** Saturday/Sunday
+  targets return `_STAFF_WEEKEND_SLOTS` (18:30-19:30, 20:30-21:30) for
+  staff and `_STUDENT_WEEKEND_SLOTS` (17:30-18:30, 19:30-20:30,
+  21:30-22:30) for student — see "Accounts and sites" for why the parity
+  split matters.
 
 Add new rest weekdays to `_REST_WEEKDAYS`. For partial exclusions (some
 slots skipped but the day still booked), reintroduce a frozenset of

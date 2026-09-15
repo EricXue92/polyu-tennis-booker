@@ -59,7 +59,7 @@ POLYU_USERNAME='...' POLYU_PASSWORD='...' \
    ```bash
    gh secret set POLYU_USERNAME --body 'your-username'
    gh secret set POLYU_PASSWORD --body 'your-password'
-   # Optional second (student-site) account, only used on STUDENT_TARGET_DATES:
+   # Optional second (student-site) account, books the adjacent hour on weekends:
    gh secret set POLYU_STUDENT_USERNAME --body 'student-username'
    gh secret set POLYU_STUDENT_PASSWORD --body 'student-password'
    ```

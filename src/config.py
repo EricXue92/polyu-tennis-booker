@@ -83,48 +83,43 @@ SLOT_PRIORITY: tuple[tuple[time, time], ...] = (
 # so the booker short-circuits to a no-op success when target_date is Tuesday.
 _REST_WEEKDAYS: frozenset[int] = frozenset({1})  # Mon=0, Tue=1, ...
 
-# On weekends, also try the late-evening slots as lower-priority fallbacks
-# (appended after SLOT_PRIORITY, so 18:30/19:30 still win by rank).
+# --- Weekend dual booking: staff + student on complementary hours ---
+# On Saturdays and Sundays the owner wants two consecutive hours, one booked
+# by each account. The accounts fire concurrently at 08:30 and cannot see each
+# other's result, so overlap is prevented statically: the staff account only
+# ever takes the "even" hours and the student account only the "odd" hours.
+# Any pair of outcomes is non-overlapping, and every pair except
+# (18:30, 21:30) is adjacent. Neither account has any weekend fallback
+# outside its parity — do not "borrow" the other account's hours.
 _WEEKEND_WEEKDAYS: frozenset[int] = frozenset({5, 6})  # Sat=5, Sun=6
-_WEEKEND_EXTRA_SLOTS: tuple[tuple[time, time], ...] = (
+_STAFF_WEEKEND_SLOTS: tuple[tuple[time, time], ...] = (
+    (time(18, 30), time(19, 30)),
     (time(20, 30), time(21, 30)),
+)
+_STUDENT_WEEKEND_SLOTS: tuple[tuple[time, time], ...] = (
+    (time(17, 30), time(18, 30)),
+    (time(19, 30), time(20, 30)),
     (time(21, 30), time(22, 30)),
 )
 
 
 def slot_priority_for(target_date: date) -> tuple[tuple[time, time], ...]:
-    """Return SLOT_PRIORITY with weekday-specific adjustments applied.
+    """Staff slot rule: SLOT_PRIORITY with weekday-specific adjustments.
 
     Returns an empty tuple on rest weekdays so the booker can skip the run;
-    appends _WEEKEND_EXTRA_SLOTS on Saturdays and Sundays.
+    on weekends returns _STAFF_WEEKEND_SLOTS (even hours only, see above).
     """
     if target_date.weekday() in _REST_WEEKDAYS:
         return ()
     if target_date.weekday() in _WEEKEND_WEEKDAYS:
-        return SLOT_PRIORITY + _WEEKEND_EXTRA_SLOTS
+        return _STAFF_WEEKEND_SLOTS
     return SLOT_PRIORITY
 
 
-# --- Student account: one-off dual booking on specific dates ---
-# The student account books alongside the staff account ONLY when the target
-# date is in STUDENT_TARGET_DATES; every other day it is skipped entirely.
-# Once the dates have passed, the set can simply be emptied.
-STUDENT_TARGET_DATES: frozenset[date] = frozenset({
-    date(2026, 9, 18),
-    date(2026, 9, 19),
-    date(2026, 9, 20),
-})
-STUDENT_SLOT_PRIORITY: tuple[tuple[time, time], ...] = (
-    (time(18, 30), time(19, 30)),
-    (time(19, 30), time(20, 30)),
-    (time(20, 30), time(21, 30)),
-    (time(21, 30), time(22, 30)),
-)
-
-
 def student_slot_priority_for(target_date: date) -> tuple[tuple[time, time], ...]:
-    if target_date in STUDENT_TARGET_DATES:
-        return STUDENT_SLOT_PRIORITY
+    """Student slot rule: weekends only, odd hours only; sits out weekdays."""
+    if target_date.weekday() in _WEEKEND_WEEKDAYS:
+        return _STUDENT_WEEKEND_SLOTS
     return ()
 
 

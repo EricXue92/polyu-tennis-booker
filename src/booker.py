@@ -142,8 +142,8 @@ def active_jobs(
 ) -> list[tuple[Account, SlotList]]:
     """Return (account, slots) for every account that books on target_date.
 
-    An account whose slot rule returns an empty tuple (rest day, or a
-    student date outside STUDENT_TARGET_DATES) is left out entirely.
+    An account whose slot rule returns an empty tuple (rest day, or the
+    student account on a weekday) is left out entirely.
     """
     jobs: list[tuple[Account, SlotList]] = []
     for account in accounts:

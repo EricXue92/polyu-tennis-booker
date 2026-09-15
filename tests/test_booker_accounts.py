@@ -15,16 +15,19 @@ from tests.test_bootstrap import _FakePage, _FIXTURE_HTML
 from tests.test_http_booker import _FakeClient
 
 
-def test_active_jobs_both_accounts_on_student_date():
+def test_active_jobs_both_accounts_on_weekend():
     from src.booker import active_jobs
 
-    jobs = active_jobs(date(2026, 9, 18), ACCOUNTS)  # Friday, student date
+    jobs = active_jobs(date(2026, 9, 19), ACCOUNTS)  # Saturday
     assert [a.name for a, _ in jobs] == ["staff", "student"]
     staff_slots = dict(jobs)[STAFF_ACCOUNT]
     student_slots = dict(jobs)[STUDENT_ACCOUNT]
-    assert staff_slots == [(time(18, 30), time(19, 30)), (time(19, 30), time(20, 30))]
-    assert student_slots[0] == (time(18, 30), time(19, 30))
-    assert len(student_slots) == 4
+    assert staff_slots == [(time(18, 30), time(19, 30)), (time(20, 30), time(21, 30))]
+    assert student_slots == [
+        (time(17, 30), time(18, 30)),
+        (time(19, 30), time(20, 30)),
+        (time(21, 30), time(22, 30)),
+    ]
 
 
 def test_active_jobs_staff_only_on_ordinary_day():
