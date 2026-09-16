@@ -942,3 +942,98 @@ async def test_client_defaults_to_staff_site():
         await client.aclose()
     assert cr.outcome is CellOutcome.ACCEPTED
     assert cell.calls.last.request.headers["referer"] == staff + "make_book.do"
+
+
+# --- Human-readable diagnostics for unexpected submit/cell_click pages ---
+# Motivation: the 2026-09-06/09-09 runs logged a 29640-byte page as
+# ERROR_FATAL with preview='<!DOCTYPE html> <html> <head> ...' — the first 300
+# bytes are pure HTML chrome, so the page's actual message never reached the
+# CI log and the "quota page" assumption could not be checked.
+
+_ERROR_PAGE = """<!DOCTYPE html><html><head><title>PolyU</title>
+<script type="text/javascript">var x = "error inside script";</script>
+<style>.a { color: red }</style></head>
+<body><div id="nav"><a href="/logout">Logout</a> &nbsp; Session</div>
+<div class="content"><p>Sorry,&nbsp;you have exceeded your booking quota for this day.</p></div>
+</body></html>"""
+
+
+def test_visible_text_strips_tags_scripts_styles_and_entities():
+    from src.http_client import _visible_text
+    text = _visible_text(_ERROR_PAGE)
+    assert "inside script" not in text
+    assert "color: red" not in text
+    assert "<" not in text
+    assert "Sorry, you have exceeded your booking quota for this day." in text
+    assert "Logout Session" in text
+
+
+def test_visible_text_handles_empty_body():
+    from src.http_client import _visible_text
+    assert _visible_text("") == ""
+    assert _visible_text(None) == ""
+
+
+def test_diag_context_returns_visible_text_windows_around_markers():
+    from src.http_client import _diag_context
+    windows = _diag_context(_ERROR_PAGE, width=40)
+    joined = " | ".join(windows)
+    assert "exceeded your booking quota" in joined
+    # Windows come from visible text, never from script bodies.
+    assert "inside script" not in joined
+
+
+def test_diag_context_merges_overlapping_windows_and_caps_count():
+    from src.http_client import _diag_context
+    # "quota" and "exceeded" sit in the same sentence: one window, not two.
+    windows = _diag_context(_ERROR_PAGE, width=200)
+    assert len(windows) == 1
+    assert _diag_context("", width=40) == []
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_submit_unexpected_logs_page_message_not_html_head(caplog):
+    from src.http_client import PolyUHttpClient, BookingResult
+    import logging
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do"
+    ).mock(return_value=Response(200, text=_ERROR_PAGE))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        with caplog.at_level(logging.WARNING, logger="booker"):
+            result = await client.submit(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert result is BookingResult.ERROR_FATAL
+    rec = [r for r in caplog.records if "submit unexpected" in r.message]
+    assert rec
+    msg = rec[0].message
+    assert "context=" in msg
+    assert "exceeded your booking quota" in msg
+    assert "<!DOCTYPE" not in msg
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_cell_click_unexpected_logs_page_message_not_html_head(caplog):
+    from src.http_client import PolyUHttpClient, CellOutcome
+    import logging
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"
+    ).mock(return_value=Response(200, text=_ERROR_PAGE.replace("quota", "not allowed")))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        with caplog.at_level(logging.WARNING, logger="booker"):
+            result = await client.cell_click(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert result.outcome is CellOutcome.ERROR_FATAL
+    rec = [r for r in caplog.records if "cell_click unexpected" in r.message]
+    assert rec
+    msg = rec[0].message
+    assert "context=" in msg
+    assert "exceeded your booking not allowed" in msg
+    assert "<!DOCTYPE" not in msg

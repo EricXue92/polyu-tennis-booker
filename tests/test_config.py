@@ -94,3 +94,14 @@ def test_accounts_staff_first_then_student():
         "student", STUDENT_SITE, "POLYU_STUDENT_USERNAME", "POLYU_STUDENT_PASSWORD")
     assert student.slot_priority is student_slot_priority_for
     assert STUDENT_SITE.base_path == "starspossfbstud"
+
+
+def test_weekday_priority_falls_back_to_2030_after_prime_hours():
+    # 2026-09-23 is a Wednesday. Weekday targets lost 18:30 and 19:30 on both
+    # courts four Wednesdays running (2026-08-26 .. 2026-09-16), so a third
+    # rung at 20:30 gives the run a live shot instead of exiting empty-handed.
+    assert slot_priority_for(date(2026, 9, 23)) == (
+        (time(18, 30), time(19, 30)),
+        (time(19, 30), time(20, 30)),
+        (time(20, 30), time(21, 30)),
+    )

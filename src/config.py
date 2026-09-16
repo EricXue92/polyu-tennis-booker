@@ -74,9 +74,14 @@ TENNIS_FACILITIES = {
 }
 
 # Try in this order. Stop after first successful booking.
+# 20:30 was added 2026-09-16 after weekday targets lost both prime hours on
+# both courts four Wednesdays running (2026-08-26 .. 2026-09-16): every submit
+# came back OCCUPIED ~3s after 08:30, so a third rung is the only way the run
+# gets a live shot on those days.
 SLOT_PRIORITY: tuple[tuple[time, time], ...] = (
     (time(18, 30), time(19, 30)),
     (time(19, 30), time(20, 30)),
+    (time(20, 30), time(21, 30)),
 )
 
 # Tuesdays are a rest day — no court is booked at all (owner's preference),

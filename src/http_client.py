@@ -13,6 +13,7 @@ plan.
 from __future__ import annotations
 
 import enum
+import html
 import logging
 import re
 from dataclasses import dataclass
@@ -83,6 +84,51 @@ def _diag_markers(body: str | None) -> list[str]:
         return []
     low = body.lower()
     return [m for m in _DIAG_MARKERS if m in low]
+
+
+_SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _visible_text(body: str | None) -> str:
+    """Return the human-visible text of an HTML body, whitespace-collapsed.
+
+    Drops <script>/<style> blocks, comments and tags, and unescapes entities.
+    PolyU's error pages are ~30 KB of chrome around a one-line message, so a
+    raw `body[:300]` preview never reaches the message (2026-09-06/09-09 logs
+    showed only '<!DOCTYPE html> <html> <head> ...' for the 29640-byte page we
+    assumed was the quota page). Diagnostics are built from this text instead.
+    """
+    if not body:
+        return ""
+    text = _SCRIPT_STYLE_RE.sub(" ", body)
+    text = _HTML_COMMENT_RE.sub(" ", text)
+    text = _HTML_TAG_RE.sub(" ", text)
+    text = html.unescape(text)
+    return " ".join(text.split())
+
+
+def _diag_context(body: str | None, width: int = 120, max_windows: int = 4) -> list[str]:
+    """Visible-text windows (±width chars) around each `_DIAG_MARKERS` hit.
+
+    Overlapping windows are merged so one sentence containing several markers
+    yields one snippet; at most `max_windows` snippets are returned so a log
+    line stays bounded even on a marker-dense page.
+    """
+    text = _visible_text(body)
+    if not text:
+        return []
+    low = text.lower()
+    hits = sorted({i for m in _DIAG_MARKERS if (i := low.find(m)) >= 0})
+    windows: list[tuple[int, int]] = []
+    for i in hits:
+        start, end = max(0, i - width), min(len(text), i + width)
+        if windows and start <= windows[-1][1]:
+            windows[-1] = (windows[-1][0], max(windows[-1][1], end))
+        else:
+            windows.append((start, end))
+    return [text[s:e] for s, e in windows[:max_windows]]
 
 
 def _classify_http_error(status: int) -> "BookingResult":
@@ -416,10 +462,11 @@ class PolyUHttpClient:
             )
             _LOG.warning(
                 "cell_click unexpected (status=%d, location=%r, body_len=%d, "
-                "preview=%r, markers=%s) -> %s",
+                "preview=%r, markers=%s, context=%s) -> %s",
                 resp.status_code, location, len(body),
-                " ".join(body[:300].split()),
+                _visible_text(body)[:300],
                 _diag_markers(body),
+                _diag_context(body),
                 outcome.name,
             )
         return CellClickResult(slot=slot, outcome=outcome, latency_ms=latency_ms)
@@ -521,10 +568,11 @@ class PolyUHttpClient:
         err = _classify_http_error(resp.status_code)
         _LOG.warning(
             "submit unexpected (status=%d, location=%r, body_len=%d, "
-            "preview=%r, markers=%s) -> %s",
+            "preview=%r, markers=%s, context=%s) -> %s",
             resp.status_code, location, len(body),
-            " ".join(body[:300].split()),
+            _visible_text(body)[:300],
             _diag_markers(body),
+            _diag_context(body),
             err.name,
         )
         return err

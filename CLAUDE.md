@@ -152,8 +152,16 @@ submit_timeout=20.0)`). `timeout` guards cell_click/warmup — those run
   body or any `make_book*` redirect ⇒ OCCUPIED (the broad match covers a
   known `302 → make_book.do` rebound that a narrow match misclassified as
   FATAL); anything else ⇒ ERROR__. `cell_click` and `submit` log body
-  diagnostics (status + Location + body_len + preview + markers) on every
-  ERROR__ so anomalies are root-causeable from CI logs alone.
+  diagnostics (status + Location + body_len + preview + markers + context)
+  on every ERROR__ so anomalies are root-causeable from CI logs alone.
+  `preview` and `context` are built from the page's **visible text**
+  (`_visible_text`, `_diag_context` in `http_client.py`), never raw HTML —
+  PolyU error pages are ~30 KB of chrome around a one-line message, and a raw
+  `body[:300]` preview never reached it. Open question as of 2026-09-16: the
+  29640-byte ERROR_FATAL page is assumed to be the quota page, but on
+  2026-09-07 both 18:30 submits got it *before* any booking existed and the
+  19:30 group then succeeded, so it may be a "slot gone" variant instead —
+  the next such run's `context=` log line decides.
 - **Password redaction.** All logging must go through
   `src/log.py:build_logger` (filter replaces the password with `***` before
   any handler) — no `print()`, no root logger. Playwright errors can quote
@@ -194,6 +202,10 @@ submit_timeout=20.0)`). `timeout` guards cell_click/warmup — those run
 ## Tuning knobs
 
 - Slot preferences: `SLOT_PRIORITY` in `src/config.py` (tuple of `(start, end)`, tried in order).
+  Weekdays currently run 18:30 → 19:30 → 20:30; the 20:30 rung was added
+  2026-09-16 after Wednesday targets went 0/4 (every submit OCCUPIED ~3s
+  after 08:30) — weekday evenings are contested, so a third rung is cheap
+  insurance.
 - Trigger time: `TRIGGER_TIME_HKT` in `src/config.py`.
 - Days-ahead window: `DAYS_AHEAD` in `src/dates.py`.
 
