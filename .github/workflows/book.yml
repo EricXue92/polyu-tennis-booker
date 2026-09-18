@@ -31,10 +31,14 @@ jobs:
       TZ: Asia/Hong_Kong
       POLYU_USERNAME: ${{ secrets.POLYU_USERNAME }}
       POLYU_PASSWORD: ${{ secrets.POLYU_PASSWORD }}
-      # Student account (starspossfbstud). Only used on STUDENT_TARGET_DATES
+      # Student account (starspossfbstud). Only used on weekend targets
       # (src/config.py); the booker never reads these on other days.
       POLYU_STUDENT_USERNAME: ${{ secrets.POLYU_STUDENT_USERNAME }}
       POLYU_STUDENT_PASSWORD: ${{ secrets.POLYU_STUDENT_PASSWORD }}
+      # Second student account (starspossfbstud). Only used on
+      # STUDENT2_TARGET_DATES (src/config.py).
+      POLYU_STUDENT2_USERNAME: ${{ secrets.POLYU_STUDENT2_USERNAME }}
+      POLYU_STUDENT2_PASSWORD: ${{ secrets.POLYU_STUDENT2_PASSWORD }}
 
     steps:
       - uses: actions/checkout@v4

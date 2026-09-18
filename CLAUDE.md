@@ -62,8 +62,8 @@ substantive changes.
 `starspossfbstud` — same host, different J2EE context root, all endpoint
 suffixes identical) and `Account` (site + credential env-var names + a
 `slot_priority(target_date)` rule). `ACCOUNTS = (STAFF_ACCOUNT,
-STUDENT_ACCOUNT)`. An account whose rule returns `()` sits the run out. Each
-`PolyUHttpClient` is bound to one `Site` and derives its URLs and Referer
+STUDENT_ACCOUNT, STUDENT2_ACCOUNT)`. An account whose rule returns `()` sits
+the run out. Each `PolyUHttpClient` is bound to one `Site` and derives its URLs and Referer
 headers from it — never hardcode a context root in the client.
 
 - **Staff account** (`POLYU_USERNAME`/`POLYU_PASSWORD`): the daily booker,
@@ -77,6 +77,13 @@ headers from it — never hardcode a context root in the client.
   result, so this static split is the only thing preventing overlap — never
   give either account a weekend fallback on the other's hours. Any outcome
   pair is non-overlapping; every pair except (18:30, 21:30) is adjacent.
+- **Second student account** (`POLYU_STUDENT2_USERNAME`/`POLYU_STUDENT2_PASSWORD`,
+  name `student2`, student site): one-off, rule `student2_slot_priority_for`.
+  Active only when the target date is in `STUDENT2_TARGET_DATES` (currently
+  2026-09-28, 09-30, 10-02), trying 20:30 → 21:30 on both courts; sits out
+  every other day. Staff still runs its normal weekday rule on those dates,
+  so a staff fallback to 20:30 can land on the same hour (other court);
+  nothing prevents that. Empty the set once the dates have passed.
 - **Per-account isolation.** A failed login or a crash in one account is
   logged and the other account still books; the run exits 1 afterwards so
   the owner is emailed. Each account logs through its own

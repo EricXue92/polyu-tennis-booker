@@ -83,10 +83,42 @@ def test_weekend_staff_and_student_slots_never_overlap():
         assert staff.isdisjoint(student)
 
 
-def test_accounts_staff_first_then_student():
-    from src.config import ACCOUNTS, STAFF_SITE, STUDENT_SITE, slot_priority_for, student_slot_priority_for
+def test_student2_books_late_evening_on_its_target_dates_only():
+    from src.config import STUDENT2_TARGET_DATES, student2_slot_priority_for
 
-    staff, student = ACCOUNTS
+    assert STUDENT2_TARGET_DATES == {
+        date(2026, 9, 28), date(2026, 9, 30), date(2026, 10, 2),  # Mon, Wed, Fri
+    }
+    expected = (
+        (time(20, 30), time(21, 30)),
+        (time(21, 30), time(22, 30)),
+    )
+    for d in STUDENT2_TARGET_DATES:
+        assert student2_slot_priority_for(d) == expected
+
+
+def test_student2_sits_out_every_other_date():
+    from src.config import student2_slot_priority_for
+
+    # The days around and between the targets, incl. the same weekdays a week
+    # earlier/later — the rule is date-based, not weekday-based.
+    for d in (
+        date(2026, 9, 21), date(2026, 9, 27), date(2026, 9, 29),
+        date(2026, 10, 1), date(2026, 10, 3), date(2026, 10, 5),
+    ):
+        assert student2_slot_priority_for(d) == ()
+
+
+def test_accounts_staff_first_then_students():
+    from src.config import (
+        ACCOUNTS, STAFF_SITE, STUDENT_SITE, slot_priority_for,
+        student2_slot_priority_for, student_slot_priority_for,
+    )
+
+    staff, student, student2 = ACCOUNTS
+    assert (student2.name, student2.site, student2.username_env, student2.password_env) == (
+        "student2", STUDENT_SITE, "POLYU_STUDENT2_USERNAME", "POLYU_STUDENT2_PASSWORD")
+    assert student2.slot_priority is student2_slot_priority_for
     assert (staff.name, staff.site, staff.username_env, staff.password_env) == (
         "staff", STAFF_SITE, "POLYU_USERNAME", "POLYU_PASSWORD")
     assert staff.slot_priority is slot_priority_for

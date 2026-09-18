@@ -37,6 +37,14 @@ def test_active_jobs_staff_only_on_ordinary_day():
     assert [a.name for a, _ in jobs] == ["staff"]
 
 
+def test_active_jobs_staff_and_student2_on_student2_target_date():
+    from src.booker import active_jobs
+
+    jobs = active_jobs(date(2026, 9, 28), ACCOUNTS)  # Monday, a student2 date
+    assert [a.name for a, _ in jobs] == ["staff", "student2"]
+    assert jobs[1][1] == [(time(20, 30), time(21, 30)), (time(21, 30), time(22, 30))]
+
+
 def test_active_jobs_empty_on_rest_day():
     from src.booker import active_jobs
 

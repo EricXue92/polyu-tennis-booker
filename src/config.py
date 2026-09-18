@@ -128,6 +128,29 @@ def student_slot_priority_for(target_date: date) -> tuple[tuple[time, time], ...
     return ()
 
 
+# --- Second student account: one-off bookings on specific dates ---
+# A different student login (starspossfbstud) that books alongside the staff
+# account ONLY when the target date is in STUDENT2_TARGET_DATES, taking any
+# one late-evening hour; every other day it sits out. Once the dates have
+# passed, the set can simply be emptied.
+STUDENT2_TARGET_DATES: frozenset[date] = frozenset({
+    date(2026, 9, 28),  # Mon
+    date(2026, 9, 30),  # Wed
+    date(2026, 10, 2),  # Fri
+})
+_STUDENT2_SLOTS: tuple[tuple[time, time], ...] = (
+    (time(20, 30), time(21, 30)),
+    (time(21, 30), time(22, 30)),
+)
+
+
+def student2_slot_priority_for(target_date: date) -> tuple[tuple[time, time], ...]:
+    """Second-student slot rule: STUDENT2_TARGET_DATES only; sits out otherwise."""
+    if target_date in STUDENT2_TARGET_DATES:
+        return _STUDENT2_SLOTS
+    return ()
+
+
 @dataclass(frozen=True)
 class Account:
     """A login identity plus the site it lives on and its slot rule.
@@ -156,8 +179,15 @@ STUDENT_ACCOUNT = Account(
     password_env="POLYU_STUDENT_PASSWORD",
     slot_priority=student_slot_priority_for,
 )
+STUDENT2_ACCOUNT = Account(
+    name="student2",
+    site=STUDENT_SITE,
+    username_env="POLYU_STUDENT2_USERNAME",
+    password_env="POLYU_STUDENT2_PASSWORD",
+    slot_priority=student2_slot_priority_for,
+)
 # Order matters only for logging; the accounts book concurrently.
-ACCOUNTS: tuple[Account, ...] = (STAFF_ACCOUNT, STUDENT_ACCOUNT)
+ACCOUNTS: tuple[Account, ...] = (STAFF_ACCOUNT, STUDENT_ACCOUNT, STUDENT2_ACCOUNT)
 
 TRIGGER_TIME_HKT = time(8, 30, 0)
 
