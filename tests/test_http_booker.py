@@ -451,3 +451,39 @@ async def test_success_in_later_group_survives_fatal_in_earlier_group():
     )
     assert rc == 0
     assert len(client.submit_calls) == 4
+
+
+@pytest.mark.asyncio
+async def test_outcome_carries_the_winning_slot():
+    """book_via_http_outcome reports which court/hour won, for the result email."""
+    from src.http_booker import book_via_http_outcome
+
+    client = _FakeClient(
+        _all_cell(CellOutcome.ACCEPTED),
+        {
+            (18, 10): BookingResult.OCCUPIED, (18, 11): BookingResult.SUCCESS,
+            (19, 10): BookingResult.OCCUPIED, (19, 11): BookingResult.OCCUPIED,
+        },
+    )
+    outcome = await book_via_http_outcome(
+        client, date(2026, 6, 10), _PRIORITY, dry_run=False, log=_LOG,
+    )
+    assert outcome.rc == 0
+    assert outcome.slot.facility_id == 11
+    assert outcome.slot.start_dt.hour == 18
+
+
+@pytest.mark.asyncio
+async def test_outcome_has_no_slot_on_failure_or_dry_run():
+    from src.http_booker import book_via_http_outcome
+
+    failed = await book_via_http_outcome(
+        _FakeClient(_all_cell(CellOutcome.OCCUPIED)),
+        date(2026, 6, 10), _PRIORITY, dry_run=False, log=_LOG,
+    )
+    assert (failed.rc, failed.slot) == (1, None)
+    dry = await book_via_http_outcome(
+        _FakeClient(_all_cell(CellOutcome.ACCEPTED)),
+        date(2026, 6, 10), _PRIORITY, dry_run=True, log=_LOG,
+    )
+    assert (dry.rc, dry.slot) == (0, None)

@@ -156,13 +156,15 @@ class Account:
     """A login identity plus the site it lives on and its slot rule.
 
     `slot_priority(target_date)` returning an empty tuple means the account
-    sits this run out.
+    sits this run out. `notify_result` accounts get their outcome (booked or
+    not) emailed to the owner after the run — see src/notify.py.
     """
     name: str
     site: Site
     username_env: str
     password_env: str
     slot_priority: Callable[[date], tuple[tuple[time, time], ...]]
+    notify_result: bool = False
 
 
 STAFF_ACCOUNT = Account(
@@ -178,6 +180,7 @@ STUDENT_ACCOUNT = Account(
     username_env="POLYU_STUDENT_USERNAME",
     password_env="POLYU_STUDENT_PASSWORD",
     slot_priority=student_slot_priority_for,
+    notify_result=True,
 )
 STUDENT2_ACCOUNT = Account(
     name="student2",

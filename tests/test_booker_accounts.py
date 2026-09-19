@@ -73,7 +73,7 @@ def _job(account, client, slots):
 
 @pytest.mark.asyncio
 async def test_book_all_returns_zero_when_every_account_books():
-    from src.booker import book_all
+    from src.booker import book_all, overall_rc
 
     target = date(2026, 9, 18)
     slots = [(time(18, 30), time(19, 30))]
@@ -85,17 +85,17 @@ async def test_book_all_returns_zero_when_every_account_books():
         {(18, 10): CellOutcome.OCCUPIED, (18, 11): CellOutcome.ACCEPTED},
         {(18, 11): BookingResult.SUCCESS},
     )
-    rc = await book_all(
+    results = await book_all(
         [_job(STAFF_ACCOUNT, staff, slots), _job(STUDENT_ACCOUNT, student, slots)],
         target, dry_run=False, log=logging.getLogger("t"),
     )
-    assert rc == 0
+    assert overall_rc(results) == 0
     assert len(staff.submit_calls) == 2 and len(student.submit_calls) == 1
 
 
 @pytest.mark.asyncio
 async def test_book_all_returns_one_when_any_account_fails():
-    from src.booker import book_all
+    from src.booker import book_all, overall_rc
 
     target = date(2026, 9, 18)
     slots = [(time(18, 30), time(19, 30))]
@@ -104,11 +104,11 @@ async def test_book_all_returns_one_when_any_account_fails():
         {(18, 10): BookingResult.SUCCESS, (18, 11): BookingResult.OCCUPIED},
     )
     student = _FakeClient({(18, 10): CellOutcome.OCCUPIED, (18, 11): CellOutcome.OCCUPIED})
-    rc = await book_all(
+    results = await book_all(
         [_job(STAFF_ACCOUNT, staff, slots), _job(STUDENT_ACCOUNT, student, slots)],
         target, dry_run=False, log=logging.getLogger("t"),
     )
-    assert rc == 1
+    assert overall_rc(results) == 1
     # The staff booking still went through — one account failing must not
     # abort the other.
     assert len(staff.submit_calls) == 2
@@ -116,7 +116,7 @@ async def test_book_all_returns_one_when_any_account_fails():
 
 @pytest.mark.asyncio
 async def test_book_all_runs_accounts_concurrently():
-    from src.booker import book_all
+    from src.booker import book_all, overall_rc
 
     target = date(2026, 9, 18)
     slots = [(time(18, 30), time(19, 30))]
@@ -126,14 +126,58 @@ async def test_book_all_runs_accounts_concurrently():
     student = _FakeClient(outcomes, results, cell_click_sleep_s=0.3)
     import time as _t
     t0 = _t.perf_counter()
-    rc = await book_all(
+    results = await book_all(
         [_job(STAFF_ACCOUNT, staff, slots), _job(STUDENT_ACCOUNT, student, slots)],
         target, dry_run=False, log=logging.getLogger("t"),
     )
     elapsed = _t.perf_counter() - t0
-    assert rc == 0
+    assert overall_rc(results) == 0
     # Serial would be >= 0.6s; concurrent lands near 0.3s.
     assert elapsed < 0.5
+
+
+@pytest.mark.asyncio
+async def test_book_all_reports_each_accounts_booked_slot_and_failure_reason():
+    from src.booker import book_all
+
+    target = date(2026, 9, 19)
+    slots = [(time(18, 30), time(19, 30))]
+    staff = _FakeClient(
+        {(18, 10): CellOutcome.ACCEPTED, (18, 11): CellOutcome.OCCUPIED},
+        {(18, 10): BookingResult.SUCCESS},
+    )
+    student = _FakeClient({(18, 10): CellOutcome.OCCUPIED, (18, 11): CellOutcome.OCCUPIED})
+    staff_r, student_r = await book_all(
+        [_job(STAFF_ACCOUNT, staff, slots), _job(STUDENT_ACCOUNT, student, slots)],
+        target, dry_run=False, log=logging.getLogger("t"),
+    )
+    assert (staff_r.name, staff_r.notify, staff_r.ok) == ("staff", False, True)
+    assert staff_r.booked.facility_id == 10
+    assert (student_r.name, student_r.notify, student_r.ok) == ("student", True, False)
+    assert student_r.booked is None and student_r.reason
+    assert student_r.slots == slots
+
+
+@pytest.mark.asyncio
+async def test_book_all_turns_a_crash_into_a_failed_result():
+    from src.booker import book_all, overall_rc
+
+    class _Boom:
+        async def cell_click(self, slot):
+            raise RuntimeError("boom")
+
+    results = await book_all(
+        [_job(STUDENT_ACCOUNT, _Boom(), [(time(17, 30), time(18, 30))])],
+        date(2026, 9, 19), dry_run=False, log=logging.getLogger("t"),
+    )
+    assert overall_rc(results) == 1
+    assert results[0].ok is False and results[0].reason
+
+
+def test_only_the_student_account_is_flagged_for_the_result_email():
+    assert {a.name: a.notify_result for a in ACCOUNTS} == {
+        "staff": False, "student": True, "student2": False,
+    }
 
 
 def test_resolve_target_date_default_is_seven_days_ahead():

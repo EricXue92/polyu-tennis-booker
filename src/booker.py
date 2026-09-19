@@ -24,6 +24,7 @@ from src.config import (
 )
 from src.dates import compute_target_date, seconds_until_hkt_time
 from src.log import build_logger
+from src.notify import AccountResult, send_report
 
 if TYPE_CHECKING:  # pragma: no cover
     from src.http_client import PolyUHttpClient
@@ -163,34 +164,53 @@ class AccountJob:
     log: logging.Logger
 
 
+def _failed(account: Account, slots: SlotList, reason: str) -> AccountResult:
+    return AccountResult(
+        name=account.name, notify=account.notify_result,
+        slots=slots, ok=False, reason=reason,
+    )
+
+
 async def book_all(
     jobs: Sequence[AccountJob],
     target_date: date,
     dry_run: bool,
     *,
     log: logging.Logger,
-) -> int:
-    """Fire every account's book_via_http concurrently.
+) -> list[AccountResult]:
+    """Fire every account's booking flow concurrently.
 
     Accounts are independent: one failing (or raising) never aborts the
-    others. Returns 0 only if every account booked; 1 otherwise, so the
-    owner is emailed whenever any expected court is missing.
+    others. Returns one AccountResult per job, in job order; `overall_rc`
+    collapses them into the run's exit code.
     """
-    from src.http_booker import book_via_http
+    from src.http_booker import book_via_http_outcome
 
-    async def _one(job: AccountJob) -> int:
+    async def _one(job: AccountJob) -> AccountResult:
         try:
-            return await book_via_http(
+            outcome = await book_via_http_outcome(
                 job.client, target_date, job.slots, dry_run, log=job.log,
             )
         except Exception:  # noqa: BLE001 - isolate accounts from each other
             job.log.exception("account %s crashed", job.account.name)
-            return 1
+            return _failed(job.account, job.slots, "程序异常，详见 GitHub Actions 日志")
+        if outcome.rc != 0:
+            return _failed(job.account, job.slots, "没抢到（场地已被占或提交失败）")
+        return AccountResult(
+            name=job.account.name, notify=job.account.notify_result,
+            slots=job.slots, ok=True, booked=outcome.slot,
+        )
 
-    results = await asyncio.gather(*(_one(j) for j in jobs))
-    for job, rc in zip(jobs, results):
-        log.info("account %s: %s", job.account.name, "BOOKED" if rc == 0 else "FAILED")
-    return 0 if all(rc == 0 for rc in results) else 1
+    results = list(await asyncio.gather(*(_one(j) for j in jobs)))
+    for result in results:
+        log.info("account %s: %s", result.name, "BOOKED" if result.ok else "FAILED")
+    return results
+
+
+def overall_rc(results: Sequence[AccountResult]) -> int:
+    """0 only if every account booked; 1 otherwise, so the owner is emailed
+    whenever any expected court is missing."""
+    return 0 if all(r.ok for r in results) else 1
 
 
 
@@ -249,7 +269,7 @@ async def run(
         log.info("woke up for pre-login phase")
 
     prepared: list[AccountJob] = []
-    login_failed = False
+    login_failures: list[AccountResult] = []
     try:
         # Phase 1: Playwright login per account (fresh context each, so the
         # two sites' path-scoped cookies never mix) -> extract session state
@@ -287,15 +307,16 @@ async def run(
 
         # A failed login for one account must not cost the other its court:
         # log it, carry on with whoever got in, and still exit 1 at the end.
-        for (account, _slots, _u, _p, acct_log), outcome in zip(creds, outcomes):
+        for (account, slots, _u, _p, acct_log), outcome in zip(creds, outcomes):
             if isinstance(outcome, BaseException):
                 # Log via the account's own logger: Playwright errors can
                 # quote field values, and only acct_log redacts this password.
                 acct_log.error("login/bootstrap failed: %r", outcome)
-                login_failed = True
+                login_failures.append(_failed(account, slots, "登录失败"))
             else:
                 prepared.append(outcome)
         if not prepared:
+            await send_report(target_date, login_failures, dry_run=dry_run)
             raise RuntimeError("every account failed to log in")
 
         # Phase 2: warm up every account's connection pool ~2s before trigger,
@@ -321,8 +342,10 @@ async def run(
             log.info("sleeping %.3fs until HKT %s (trigger)", delay, TRIGGER_TIME_HKT)
             await asyncio.sleep(delay)
             log.info("woke up at trigger time, firing predictive booking for %d account(s)", len(prepared))
-        rc = await book_all(prepared, target_date, dry_run, log=log)
-        return 1 if login_failed else rc
+        results = login_failures + await book_all(prepared, target_date, dry_run, log=log)
+        # Best-effort and strictly after the hot path; never affects the exit code.
+        await send_report(target_date, results, dry_run=dry_run)
+        return overall_rc(results)
     finally:
         for job in prepared:
             await job.client.aclose()

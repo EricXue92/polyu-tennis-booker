@@ -40,7 +40,8 @@ each at 08:29 (concurrently, one browser context per account), extracts
 session state (cookies + CSRFToken + fbUserId) via `bootstrap_http_client`,
 closes the browser, sleeps to 08:30:00.000, and hands off to
 `src/http_booker.py:book_via_http` once per account via `book_all`
-(`asyncio.gather`; exit 0 only if every account booked). That orchestrator **skips search**
+(`asyncio.gather`; one `AccountResult` per account, exit 0 via `overall_rc`
+only if every account booked). That orchestrator **skips search**
 and runs two phases over the `(SLOT_PRIORITY × TENNIS_FACILITIES)` candidate
 set: phase 1 fires every candidate's `cell_click()` concurrently via
 `asyncio.gather`; phase 2 groups ACCEPTED cells by `(start, end)` time-slot
@@ -84,6 +85,17 @@ headers from it — never hardcode a context root in the client.
   every other day. Staff still runs its normal weekday rule on those dates,
   so a staff fallback to 20:30 can land on the same hour (other court);
   nothing prevents that. Empty the set once the dates have passed.
+- **Student result email.** Accounts with `notify_result=True` (only the
+  weekend `student` account — not staff, not `student2`) get their outcome
+  emailed to the owner after every run they take part in — booked (date,
+  hour, court) or not (reason + hours tried); a run without that account
+  (i.e. every weekday target) sends nothing. `src/notify.py` sends
+  it over Gmail SMTP (`SMTP_USERNAME`/`SMTP_PASSWORD` = Gmail app password;
+  recipient `NOTIFY_EMAIL_TO`, default `SMTP_USERNAME` — the repo is public,
+  so never hardcode the address). It runs strictly after `book_all`, is
+  best-effort (missing secrets or an SMTP error is a WARNING), and must never
+  change the exit code. A dry run sends a `[DRY RUN]` email, which is how to
+  verify the SMTP secrets.
 - **Per-account isolation.** A failed login or a crash in one account is
   logged and the other account still books; the run exits 1 afterwards so
   the owner is emailed. Each account logs through its own
@@ -179,8 +191,10 @@ submit_timeout=20.0)`). `timeout` guards cell_click/warmup — those run
   downstream selector timeout.
 - **Exit codes drive notification.** Exit 0 = every active account booked
   (silent). Exit 1 = any account got no slot or errored — GitHub emails the
-  workflow owner on failure. There is
-  deliberately no success-notification path.
+  workflow owner on failure. The staff
+  account deliberately has no success-notification path; the `student`
+  account's result email (see "Accounts and sites") is separate and never
+  feeds back into the exit code.
 - **Tests are offline.** Everything in `tests/` uses fakes (e.g.
   `_FakeClient`) — no network, no Playwright. Don't add live integration
   tests; verify with `--dry-run` against the real site.

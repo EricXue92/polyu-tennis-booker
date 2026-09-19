@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import date, datetime, time
 from typing import Protocol
 
@@ -88,6 +89,13 @@ def _build_candidates(
     return candidates
 
 
+@dataclass(frozen=True)
+class BookingOutcome:
+    """Exit code plus the winning slot (None on failure and on a dry run)."""
+    rc: int
+    slot: AvailableSlot | None = None
+
+
 async def book_via_http(
     client: _ClientLike,
     target_date: date,
@@ -97,16 +105,32 @@ async def book_via_http(
     log: logging.Logger,
     stagger_s: float = SUBMIT_STAGGER_SECONDS,
 ) -> int:
+    """Run the booking flow. Returns 0 on SUCCESS, 1 otherwise."""
+    outcome = await book_via_http_outcome(
+        client, target_date, slots, dry_run, log=log, stagger_s=stagger_s,
+    )
+    return outcome.rc
+
+
+async def book_via_http_outcome(
+    client: _ClientLike,
+    target_date: date,
+    slots: list[tuple[time, time]],
+    dry_run: bool,
+    *,
+    log: logging.Logger,
+    stagger_s: float = SUBMIT_STAGGER_SECONDS,
+) -> BookingOutcome:
     """Run the parallel cell-click + staggered time-grouped submit flow.
 
-    Returns 0 on SUCCESS, 1 otherwise.
+    Same flow as `book_via_http`, but also reports which slot won.
     """
     candidates = _build_candidates(target_date, slots)
     log.info("predictive booking: %d candidates queued", len(candidates))
 
     if dry_run:
         log.info("DRY RUN: stopping before cell_click phase")
-        return 0
+        return BookingOutcome(0)
 
     # Phase 1: parallel cell-clicks.
     # return_exceptions=False - cell_click catches httpx.HTTPError internally
@@ -132,7 +156,7 @@ async def book_via_http(
             "no cell_click ACCEPTED; exiting 1 (results: %s)",
             [cr.outcome.name for cr in cell_results],
         )
-        return 1
+        return BookingOutcome(1)
 
     # Phase 2: group ACCEPTED by (start, end) preserving rank order.
     groups: "OrderedDict[tuple[datetime, datetime], list[tuple[int, AvailableSlot]]]" = OrderedDict()
@@ -201,7 +225,7 @@ async def book_via_http(
                 "multi-SUCCESS across %d bookings: also booked %s — cancel manually",
                 len(successes), surplus,
             )
-        return 0
+        return BookingOutcome(0, winner_slot)
 
     # No SUCCESS anywhere. A FATAL now only decides the exit path's log line;
     # a FATAL alongside a SUCCESS in another group is just PolyU's quota page
@@ -211,7 +235,7 @@ async def book_via_http(
             "submit ERROR_FATAL with no SUCCESS among %d ACCEPTED candidates; "
             "exiting 1 (auth presumed dead)", len(accepted),
         )
-        return 1
+        return BookingOutcome(1)
 
     log.warning("no submit succeeded among %d ACCEPTED candidates; exiting 1", len(accepted))
-    return 1
+    return BookingOutcome(1)

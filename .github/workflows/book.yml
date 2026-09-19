@@ -39,6 +39,12 @@ jobs:
       # STUDENT2_TARGET_DATES (src/config.py).
       POLYU_STUDENT2_USERNAME: ${{ secrets.POLYU_STUDENT2_USERNAME }}
       POLYU_STUDENT2_PASSWORD: ${{ secrets.POLYU_STUDENT2_PASSWORD }}
+      # Result email for the `student` account (src/notify.py): Gmail address
+      # + app password. NOTIFY_EMAIL_TO is optional; unset sends to
+      # SMTP_USERNAME itself. Missing secrets just skip the email.
+      SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      NOTIFY_EMAIL_TO: ${{ secrets.NOTIFY_EMAIL_TO }}
 
     steps:
       - uses: actions/checkout@v4
