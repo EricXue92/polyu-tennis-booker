@@ -29,212 +29,185 @@ gh workflow run "Daily Tennis Booking" -f dry_run=true -f skip_sleep=true -f tar
 gh run watch <id> --interval 15 --exit-status                  # block until done
 ```
 
+`--dry-run` stops before any cell-click (it verifies login + bootstrap only).
+`--skip-sleep` runs immediately instead of waiting until 08:30 HKT — and also
+skips the warmup; after 08:30, `dry_run=true skip_sleep=false` exercises the
+warmup path too, since every sleep is then 0.
+
 Cloudflare Worker (trigger + watchdog): `cd infra/cloudflare-worker`, then
 `npx wrangler deploy` / `npx wrangler tail`; PAT rotation and local cron
 testing are in its `README.md`.
 
-`--dry-run` walks the full flow but stops before clicking final Submit (so it
-doesn't actually book a court). `--skip-sleep` runs immediately instead of
-waiting until 08:30 HKT.
-
 ## Architecture
 
-The booking flow spans three files. `src/booker.py:run` picks the active
-accounts for the target date (`active_jobs`), does a Playwright login for
-each at 08:29 (concurrently, one browser context per account), extracts
-session state (cookies + CSRFToken + fbUserId) via `bootstrap_http_client`,
-closes the browser, sleeps to 08:30:00.000, and hands off to
-`src/http_booker.py:book_via_http` once per account via `book_all`
+`src/booker.py:run` picks the active accounts for the target date
+(`active_jobs`), does a Playwright login for each at 08:29 (concurrently, one
+browser context per account), extracts session state (cookies + CSRFToken +
+fbUserId) via `bootstrap_http_client`, closes the browser, warms each
+account's connection pool (`warm_all`), sleeps to 08:30:00.000, and hands off
+to `src/http_booker.py:book_via_http` once per account via `book_all`
 (`asyncio.gather`; one `AccountResult` per account, exit 0 via `overall_rc`
-only if every account booked). That orchestrator **skips search**
-and runs two phases over the `(SLOT_PRIORITY × TENNIS_FACILITIES)` candidate
-set: phase 1 fires every candidate's `cell_click()` concurrently via
-`asyncio.gather` (re-firing timed-out candidates if none was ACCEPTED);
-phase 2 groups ACCEPTED cells by `(start, end)` time-slot
-preserving rank order, fires each group's `submit()` concurrently, and
-**staggers** the groups — group N+1 launches once the earlier groups settle or
-`SUBMIT_STAGGER_SECONDS` (2.5s) elapses, whichever is first. The winner is the
-lowest-rank SUCCESS across all groups. The client (`src/http_client.py`)
-issues the booking POSTs (make_book.do, make_book_submit.do) over raw httpx —
-no Playwright, no search on the hot path. (`PolyUHttpClient.search()` still
-exists for diagnostic use but isn't called in production.)
+only if every account booked).
 
-Design rationale through 2026-08 lives in `docs/superpowers/specs/` and
-`docs/superpowers/plans/`. Later changes (dual accounts, notify, cell-click
-retry) have no spec — the Invariants below are their only record.
+That orchestrator **skips search** and runs two phases over the
+`(SLOT_PRIORITY × TENNIS_FACILITIES)` candidate set. Phase 1 fires every
+candidate's `cell_click()` concurrently (re-firing timed-out candidates if
+none was ACCEPTED). Phase 2 groups ACCEPTED cells by `(start, end)` time-slot
+preserving rank order, fires each group's `submit()` concurrently, and
+**staggers** the groups. The winner is the lowest-rank SUCCESS across all
+groups. The client (`src/http_client.py`) issues the POSTs (make_book.do,
+make_book_submit.do) over raw httpx — no Playwright on the hot path.
+(`PolyUHttpClient.search()` exists for diagnostics only.)
+
+**History.** `docs/incidents.md` is the dated incident log; rules below cite
+it as `[YYYY-MM-DD]` — read the cited entry before changing that rule. Design
+rationale through 2026-08 is in `docs/superpowers/specs/` and `plans/`; later
+changes (dual accounts, notify, cell-click retry) have no spec.
 
 ## Accounts and sites
 
 `src/config.py` defines `Site` (staff `starspossfbns`, student
-`starspossfbstud` — same host, different J2EE context root, all endpoint
-suffixes identical) and `Account` (site + credential env-var names + a
+`starspossfbstud` — same host, different J2EE context root, identical endpoint
+suffixes) and `Account` (site + credential env-var names + a
 `slot_priority(target_date)` rule). `ACCOUNTS = (STAFF_ACCOUNT,
 STUDENT_ACCOUNT, STUDENT2_ACCOUNT)`. An account whose rule returns `()` sits
-the run out. Each `PolyUHttpClient` is bound to one `Site` and derives its URLs and Referer
-headers from it — never hardcode a context root in the client.
+the run out. Each `PolyUHttpClient` is bound to one `Site` and derives its
+URLs and Referer headers from it — never hardcode a context root in the
+client.
 
-- **Staff account** (`POLYU_USERNAME`/`POLYU_PASSWORD`): the daily booker,
-  rule `slot_priority_for` (see weekday adjustments below).
-- **Student account** (`POLYU_STUDENT_USERNAME`/`POLYU_STUDENT_PASSWORD`):
-  weekends only, rule `student_slot_priority_for`. The owner wants two
-  consecutive hours on Saturdays/Sundays, one hour per account, so the two
-  accounts split the evening by parity: staff takes the **even** hours
-  (18:30 → 20:30), student the **odd** hours (17:30 → 19:30 → 21:30), both
-  on both courts. Both fire at 08:30 together and cannot see each other's
-  result, so this static split is the only thing preventing overlap — never
-  give either account a weekend fallback on the other's hours. Any outcome
-  pair is non-overlapping; every pair except (18:30, 21:30) is adjacent.
-- **Second student account** (`POLYU_STUDENT2_USERNAME`/`POLYU_STUDENT2_PASSWORD`,
-  name `student2`, student site): one-off, rule `student2_slot_priority_for`.
-  Active only when the target date is in `STUDENT2_TARGET_DATES` (currently
-  2026-09-28, 09-30, 10-02), trying 20:30 → 21:30 on both courts; sits out
-  every other day. Staff still runs its normal weekday rule on those dates,
-  so a staff fallback to 20:30 can land on the same hour (other court);
-  nothing prevents that. Empty the set once the dates have passed.
-- **Student result email.** Accounts with `notify_result=True` (only the
-  weekend `student` account — not staff, not `student2`) get their outcome
-  emailed to the owner after every run they take part in — booked (date,
-  hour, court) or not (reason + hours tried); a run without that account
-  (i.e. every weekday target) sends nothing. `src/notify.py` sends
-  it over Gmail SMTP (`SMTP_USERNAME`/`SMTP_PASSWORD` = Gmail app password;
-  recipient `NOTIFY_EMAIL_TO`, default `SMTP_USERNAME` — the repo is public,
-  so never hardcode the address). It runs strictly after `book_all`, is
-  best-effort (missing secrets or an SMTP error is a WARNING), and must never
-  change the exit code. A dry run sends a `[DRY RUN]` email, which is how to
-  verify the SMTP secrets.
-- **Per-account isolation.** A failed login or a crash in one account is
-  logged and the other account still books; the run exits 1 afterwards so
-  the owner is emailed. Each account logs through its own
-  `build_logger(..., session_id=name)` so its password is redacted.
+- **Staff** (`POLYU_USERNAME`/`POLYU_PASSWORD`): the daily booker, rule
+  `slot_priority_for` (see weekday adjustments below).
+- **Student** (`POLYU_STUDENT_USERNAME`/`POLYU_STUDENT_PASSWORD`): weekends
+  only, rule `student_slot_priority_for`. The owner wants two consecutive
+  weekend hours, one per account, so the evening is split by parity: staff
+  takes the **even** hours (18:30 → 20:30), student the **odd** hours (17:30 →
+  19:30 → 21:30), both on both courts. Both fire at 08:30 blind to each
+  other, so this static split is the only thing preventing overlap — never
+  give either account a weekend fallback on the other's hours.
+- **Student2** (`POLYU_STUDENT2_USERNAME`/`POLYU_STUDENT2_PASSWORD`, student
+  site): one-off, rule `student2_slot_priority_for`. Active only for target
+  dates in `STUDENT2_TARGET_DATES` (2026-09-28, 09-30, 10-02), trying 20:30 →
+  21:30. Staff still runs its weekday rule those days, so both can land on
+  20:30 (different courts); nothing prevents that. Empty the set after
+  2026-10-02.
+- **Student result email.** Accounts with `notify_result=True` (only
+  `student`) get their outcome emailed after every run they take part in;
+  weekday runs send nothing. `src/notify.py` uses Gmail SMTP
+  (`SMTP_USERNAME`/`SMTP_PASSWORD` = app password; recipient
+  `NOTIFY_EMAIL_TO`, default `SMTP_USERNAME` — the repo is public, never
+  hardcode the address). It runs strictly after `book_all`, is best-effort
+  (failure is a WARNING), and must never change the exit code. A dry run
+  sends a `[DRY RUN]` email — that is how to verify the SMTP secrets.
+- **Per-account isolation.** A failed login or crash in one account is logged
+  and the others still book; the run exits 1 afterwards. Each account logs
+  through its own `build_logger(..., session_id=name)` so its password is
+  redacted.
 
 ## Invariants (do not break these)
 
-- **PolyU releases 7-days-ahead slots at EXACTLY 08:30 HKT.** Never let the
-  booker run before 08:30 (no `skip_sleep=true` by default, don't remove the
+Timing:
+
+- **Slots open at EXACTLY 08:30 HKT.** Never let the booker run earlier: no
+  `skip_sleep=true` by default, don't remove the
   `asyncio.sleep(seconds_until_hkt_time(...))` calls in `booker.run`, don't
-  lower `TRIGGER_TIME_HKT`). Early sees no slots; late loses popular slots.
-- **An external Cloudflare Worker triggers the workflow**
-  (`infra/cloudflare-worker/`) at 07:30 HKT via `workflow_dispatch` — GH
-  Actions' scheduled cron proved unreliable, so the workflow has **no
-  `schedule:` block**. The 60-min lead absorbs runner queue delays (observed
-  up to 35 min); the booker sleeps to 08:30:00.000 regardless of start time.
-  A second Worker cron at 08:35 opens a GitHub issue (auto-emails the owner)
-  if no successful run exists for the day.
-- **`skip_sleep` default MUST stay `false` in book.yml.** The CF Worker
+  lower `TRIGGER_TIME_HKT`. Early sees no slots; late loses popular ones.
+- **A Cloudflare Worker triggers the workflow** (`infra/cloudflare-worker/`)
+  at 07:30 HKT via `workflow_dispatch`; GH's scheduled cron proved
+  unreliable, so book.yml has **no `schedule:` block** `[2026-05-10]`. The
+  60-min lead absorbs runner queue delays. A second Worker cron at 08:35
+  opens a GitHub issue (emails the owner) if the day has no successful run.
+- **`skip_sleep` default MUST stay `false` in book.yml.** The Worker
   dispatches with no inputs, so defaults apply — `true` would book before
   slot-open and silently fail. The Worker also hardcodes `ref: "main"`.
-- **Three-phase sleep — do not collapse or skip the warmup.** Sleep to
-  08:29:00 → Playwright login + `bootstrap_http_client`, close browser; sleep
-  to 08:29:58 → `client.warmup(n=len(candidates))` (one warm connection only
-  helps the first concurrent POST, so warmup primes TCP+TLS for every
-  candidate); sleep to 08:30:00.000 → fire. Landing every cell-click on a
-  warm connection at exactly 08:30 is the point: a cold first POST took 5.5s
-  on 2026-06-05. (An off-peak cold reconnect measured 100–180ms on
-  2026-09-20, so that cost is mostly 08:30 server load — cold is a handicap,
-  which is why a late warmup fires cold rather than waiting; see next.)
-- **Warmup never delays the trigger.** `booker.warm_all` waits for the warmup
-  GETs only until 08:30:00; stragglers keep running in the background (not
-  cancelled — they still add warm sockets to the pool) and the fire goes out on
-  time, `max_connections=16` leaving room for cold connections beside them. On
-  2026-09-20 the student warmup took 3.76s and, because the trigger awaited it,
-  _both_ accounts fired at 08:30:01.8. Do not "fix" slow warmups by starting
-  them earlier: PolyU drops idle keepalives after ~5s (measured 2026-09-20:
-  reused after 3s idle, reconnected after 6s), so `WARMUP_LEAD_SECONDS` must
-  stay small.
-- **No search on the hot path.** PolyU's Search endpoint takes ~4.5s
-  server-side — long enough to lose every desired slot. `book_via_http`
-  fabricates `AvailableSlot`s from the candidate set and goes straight to
-  `make_book.do`. Candidates for facility IDs that don't exist on the target
-  date just return OCCUPIED (one wasted POST, same code path).
-- **Parallel semantics.** Cell-click results (OCCUPIED / ERROR_TRANSIENT /
-  ERROR_FATAL) are **per-candidate** — one FATAL does not abort the run.
-  Submits: any SUCCESS anywhere wins, and the winner is chosen **by rank**,
-  never by arrival order — groups overlap, so a fast 19:30 answer must not
-  beat a slower 18:30 one. Launching stops early if a settled group already
-  holds a SUCCESS (don't spend the daily quota on a fallback) or a FATAL with
-  no SUCCESS (auth presumed dead). A FATAL alongside a SUCCESS in another
-  group is just PolyU's quota page rejecting the surplus commit — expected,
-  not an error. Do not reintroduce serial submits or serial _groups_: one
-  hung rank-0 submit once locked out all its siblings, and strictly serial
-  groups cost 7 consecutive runs in 2026-08 (see below).
-- **Cell-click timeouts are retried, never final.** If a round ends with no
-  ACCEPTED but some ERROR_TRANSIENT, `book_via_http` re-fires just those
-  candidates (`CELL_RETRY_*` in `http_booker.py`: new rounds start for up to
-  45s, 15s per-request budget, rounds paced ≥1s) until one is ACCEPTED, none
-  is transient, or the window closes. 2026-09-20: PolyU was slow at 08:30, all
-  10 cell_clicks (both accounts) hit the 6s ReadTimeout, the run quit at
-  08:30:07, and 19:30 stayed free until the owner booked it by hand. No retry
-  once anything is ACCEPTED — a ready submit must not wait on a slow sibling.
-- **Submit groups are staggered, never serialized** (`SUBMIT_STAGGER_SECONDS
-= 2.5` in `http_booker.py`). Root cause of the 2026-08-19..2026-08-27
-  outage (7 lost runs, 1 win): every 18:30 submit hung past the 6s client
-  timeout, and because the 19:30 fallback only fired _after_ that hang it was
-  always OCCUPIED by then. The stagger keeps 18:30 first into PolyU's queue
-  (dispatched ~2.3s earlier) while guaranteeing 19:30 still gets a live shot.
-  On a healthy day the 18:30 submit answers in ~3.8s, i.e. after the stagger,
-  so the 19:30 submits _do_ fire and get quota-rejected — that WARNING is
-  expected noise, not a regression.
-- **Double-booking is prevented by PolyU, not by us.** Quota permits one
-  booking per day, so a surplus commit returns the quota page (observed
-  2026-08-29: rank 1 got it after rank 0 won). `book_via_http` still logs a
-  multi-SUCCESS WARNING listing surplus bookings for manual cancel, as a
-  belt-and-braces check if that quota rule ever changes. Deliberately no
-  auto-cancel path.
-- **Two timeout budgets, not one** (`PolyUHttpClient(timeout=6.0,
-submit_timeout=20.0)`). `timeout` guards cell_click/warmup — those run
-  150–300ms warm and are all gathered together, so one hang stalls the whole
-  submit phase (cell-click _retry_ rounds get 15s instead: nothing is queued
-  behind them). `submit_timeout` guards `make_book_submit.do`, which does the
-  real transactional work and legitimately takes 4–6s+ at 08:30; connect
-  stays on the short budget since the pool is already warm. A single shared
-  6s budget sat in the middle of the submit latency distribution and killed
-  every contested booking. Aborting a submit rolls it back server-side
-  (confirmed: none of the 7 timed-out days produced a court), so waiting is
-  strictly better than giving up.
+- **Three-phase sleep — don't collapse it or skip the warmup.** 08:29:00
+  login + bootstrap, close browser → 08:29:58 `client.warmup(n=candidates)`
+  (one warm connection only helps the first concurrent POST) → 08:30:00.000
+  fire. A cold first POST at 08:30 once took 5.5s `[2026-06-05]`.
+- **Warmup never delays the trigger.** `booker.warm_all` waits only until
+  08:30:00; stragglers keep running (not cancelled — they still add warm
+  sockets) and the fire goes out on time, `max_connections=16` leaving room
+  for cold connections. Don't start the warmup earlier instead: PolyU drops
+  idle keepalives after ~5s, so `WARMUP_LEAD_SECONDS` must stay small
+  `[2026-09-20]`.
+
+Hot path:
+
+- **No search.** PolyU's Search takes ~4.5s server-side. `book_via_http`
+  fabricates `AvailableSlot`s from the candidate set and posts straight to
+  make_book.do; a nonexistent facility ID just returns OCCUPIED
+  `[2026-06-03]`.
+- **Cell-click results are per-candidate.** One OCCUPIED / TRANSIENT / FATAL
+  never aborts its siblings.
+- **Cell-click timeouts are retried, never final.** A round with no ACCEPTED
+  but some ERROR_TRANSIENT re-fires just those candidates (`CELL_RETRY_*` in
+  `http_booker.py`: rounds for up to 45s, 15s per request, paced ≥1s). No
+  retry once anything is ACCEPTED — a ready submit must not wait on a slow
+  sibling. A timeout says nothing about the slot `[2026-09-20]`.
+- **Submits: concurrent within a group, groups staggered, never serial**
+  (`SUBMIT_STAGGER_SECONDS = 2.5`: group N+1 launches when earlier groups
+  settle or the stagger elapses). Serial submits let one hung rank-0 lock out
+  its siblings `[2026-06-18]`; serial groups lost 7 runs `[2026-08-19]`.
+- **The winner is chosen by rank, never by arrival order** — groups overlap,
+  so a fast 19:30 answer must not beat a slower 18:30 one. Launching stops
+  early once a settled group holds a SUCCESS (don't burn the daily quota on a
+  fallback) or a FATAL with no SUCCESS (auth presumed dead).
+- **Two timeout budgets** (`PolyUHttpClient(timeout=6.0,
+submit_timeout=20.0)`). `timeout` guards cell_click/warmup: 150–300ms warm,
+  and gathered, so one hang stalls the whole submit phase (retry rounds get
+  15s — nothing is queued behind them). `submit_timeout` guards
+  make_book_submit.do, which legitimately takes 4–6s+ at 08:30; connect stays
+  on the short budget. Aborting a submit rolls it back server-side, so
+  waiting always beats giving up `[2026-08-19]`.
+- **Double-booking is prevented by PolyU's quota, not by us** (one booking
+  per day; a surplus commit gets the quota page `[2026-08-29]`). The
+  multi-SUCCESS WARNING stays as belt-and-braces. Deliberately no auto-cancel
+  path.
 - **Submit result is decided from one response — no waiter race.** Location
-  header `make_book_result.do` ⇒ SUCCESS; "occupied" (case-insensitive) in
-  body or any `make_book*` redirect ⇒ OCCUPIED (the broad match covers a
-  known `302 → make_book.do` rebound that a narrow match misclassified as
-  FATAL); anything else ⇒ ERROR__. `cell_click` and `submit` log body
-  diagnostics (status + Location + body_len + preview + markers + context)
-  on every ERROR__ so anomalies are root-causeable from CI logs alone.
-  `preview` and `context` are built from the page's **visible text**
-  (`_visible_text`, `_diag_context` in `http_client.py`), never raw HTML —
-  PolyU error pages are ~30 KB of chrome around a one-line message, and a raw
-  `body[:300]` preview never reached it. Open question as of 2026-09-16: the
-  29640-byte ERROR_FATAL page is assumed to be the quota page, but on
-  2026-09-07 both 18:30 submits got it _before_ any booking existed and the
-  19:30 group then succeeded, so it may be a "slot gone" variant instead —
-  the next such run's `context=` log line decides.
-- **Uniform sub-second OCCUPIED means pre-reserved courts, not a bug.** When
-  diagnosing a failed run, check submit latency first. A slot lost to
-  competition answers OCCUPIED after the normal ~3.8–6s submit latency; if
-  _every_ candidate (all hours, both courts) comes back OCCUPIED within ~0.5s
-  of 08:30, the courts were reserved ahead of the public release and were
-  never open to us (2026-09-19 run, target Sat 2026-09-26: all 10 submits
-  OCCUPIED by 08:30:01.6; owner confirmed the advance reservation). Cell-click
-  ACCEPTED does not imply availability — it is only session state. Nothing to
-  fix on such a day; contrast with transport failures (ReadTimeout, no server
-  answer), which are real booker problems.
-- **Password redaction.** All logging must go through
-  `src/log.py:build_logger` (filter replaces the password with `***` before
-  any handler) — no `print()`, no root logger. Playwright errors can quote
-  field values.
-- **Login verification.** After submitting credentials, `login()` checks the
-  URL still contains `loginhome` or the username field is still present and
-  raises `LoginFailed` — wrong credentials must not masquerade as a
-  downstream selector timeout.
+  `make_book_result.do` ⇒ SUCCESS; "occupied" (case-insensitive) in the body
+  or any `make_book*` redirect ⇒ OCCUPIED `[2026-06-07]`; anything else ⇒
+  `ERROR_*`. Every `ERROR_*` from `cell_click`/`submit` logs status +
+  Location + body_len + preview + markers + context, with `preview`/`context`
+  built from the page's **visible text** (`_visible_text`, `_diag_context`),
+  never raw HTML — PolyU error pages are ~30 KB of chrome around one line
+  `[2026-09-06]`.
+
+Hygiene:
+
+- **Password redaction.** All logging goes through `src/log.py:build_logger`
+  (the filter replaces the password with `***` before any handler) — no
+  `print()`, no root logger. Playwright errors can quote field values.
+- **Login verification.** After submitting credentials, `login()` raises
+  `LoginFailed` if the URL still contains `loginhome` or the username field
+  is still present — wrong credentials must not masquerade as a downstream
+  selector timeout.
 - **Exit codes drive notification.** Exit 0 = every active account booked
   (silent). Exit 1 = any account got no slot or errored — GitHub emails the
-  workflow owner on failure. The staff
-  account deliberately has no success-notification path; the `student`
-  account's result email (see "Accounts and sites") is separate and never
-  feeds back into the exit code.
+  workflow owner. Staff deliberately has no success notification; the
+  `student` result email is separate and never feeds the exit code.
 - **Tests are offline.** Everything in `tests/` uses fakes (e.g.
   `_FakeClient`) — no network, no Playwright. Don't add live integration
   tests; verify with `--dry-run` against the real site.
-- **CI sets `TZ: Asia/Hong_Kong`** — `dates.py:now_hkt()` and the cron
-  comments assume it. Don't remove it from `.github/workflows/book.yml`.
+- **CI sets `TZ: Asia/Hong_Kong`** — `dates.py:now_hkt()` assumes it. Don't
+  remove it from `.github/workflows/book.yml`.
+
+## Reading a failed run
+
+Check latencies before suspecting the code:
+
+- **Every candidate OCCUPIED within ~0.5s of 08:30** → the courts were
+  reserved ahead of the public release; nothing to fix. A slot lost to
+  competition answers after normal submit latency (~3.8–6s). Cell-click
+  ACCEPTED is only session state, not availability `[2026-09-19]`.
+- **`submit unexpected … ERROR_FATAL` next to a SUCCESS** → PolyU's quota page
+  rejecting the surplus commits; expected on every healthy day, because 18:30
+  answers at ~3.8s, after the stagger has already launched 19:30. The quota
+  check counts a sibling commit still in flight, so the rejection can arrive
+  _before_ the SUCCESS `[2026-09-17]`.
+- **`cell_click transport error: ReadTimeout` + `retrying them (attempt N)`**
+  → PolyU was slow; the retry path is working as designed `[2026-09-20]`.
+- **Open:** a 29640-byte ERROR_FATAL page that is _not_ the quota page
+  (29715 bytes) and whose message the diagnostics don't capture yet — see
+  `[2026-09-17]` before building on any assumption about it.
 
 ## Maintenance hooks (when PolyU changes)
 
@@ -250,38 +223,34 @@ submit_timeout=20.0)`). `timeout` guards cell_click/warmup — those run
   update the templates in `src/http_client.py`. Requires a known free
   off-peak slot — see the script's header comment. CI uploads any
   `artifacts/` content if present; the booker itself creates no files.
-- **Dry-run stops before any cell-click** — it verifies login + bootstrap
-  only, NOT that PolyU still accepts our cell-click POST shape. To live-test
-  that: drop `dry_run`, set `SLOT_PRIORITY` to a known-free off-peak window,
-  and run before 08:30 HKT.
+- **Dry-run does not prove PolyU still accepts our cell-click POST shape.**
+  To live-test that: drop `dry_run`, set `SLOT_PRIORITY` to a known-free
+  off-peak window, and run before 08:30 HKT.
 
 ## Tuning knobs
 
-- Slot preferences: `SLOT_PRIORITY` in `src/config.py` (tuple of `(start, end)`, tried in order).
-  Weekdays currently run 18:30 → 19:30 → 20:30; the 20:30 rung was added
-  2026-09-16 after Wednesday targets went 0/4 (every submit OCCUPIED ~3s
-  after 08:30) — weekday evenings are contested, so a third rung is cheap
-  insurance.
+- Slot preferences: `SLOT_PRIORITY` in `src/config.py` (tuple of
+  `(start, end)`, tried in order). Weekdays run 18:30 → 19:30 → 20:30; the
+  third rung is cheap insurance on contested evenings `[2026-09-16]`.
 - Trigger time: `TRIGGER_TIME_HKT` in `src/config.py`.
 - Days-ahead window: `DAYS_AHEAD` in `src/dates.py`.
+- Submit stagger / cell-click retry: `SUBMIT_STAGGER_SECONDS`, `CELL_RETRY_*`
+  in `src/http_booker.py`.
 
 ## Weekday-specific adjustments
 
 `config.slot_priority_for(target_date)` adjusts `SLOT_PRIORITY` per weekday
-before sessions are created. When it returns an empty tuple, `run()`
+before sessions are created. When every account's rule returns `()`, `run()`
 short-circuits with exit 0 (no sleep, no Playwright launch) — the watchdog
 treats the day as accounted for and does not open an issue. Currently:
 
 - **Tuesday is a rest day.** `target_date.weekday() == 1` is in
-  `_REST_WEEKDAYS`, so Tuesday-target runs skip booking entirely (owner's
-  preference).
-- **Weekends split hours between the two accounts.** Saturday/Sunday
-  targets return `_STAFF_WEEKEND_SLOTS` (18:30-19:30, 20:30-21:30) for
-  staff and `_STUDENT_WEEKEND_SLOTS` (17:30-18:30, 19:30-20:30,
-  21:30-22:30) for student — see "Accounts and sites" for why the parity
-  split matters.
+  `_REST_WEEKDAYS` (owner's preference).
+- **Weekends split hours between the two accounts.** Saturday/Sunday targets
+  return `_STAFF_WEEKEND_SLOTS` (18:30, 20:30) for staff and
+  `_STUDENT_WEEKEND_SLOTS` (17:30, 19:30, 21:30) for student — see "Accounts
+  and sites" for why the parity split matters.
 
-Add new rest weekdays to `_REST_WEEKDAYS`. For partial exclusions (some
-slots skipped but the day still booked), reintroduce a frozenset of
-`(start, end)` tuples and filter `SLOT_PRIORITY` against it in
-`slot_priority_for`.
+Add new rest weekdays to `_REST_WEEKDAYS`. For partial exclusions (some slots
+skipped but the day still booked), reintroduce a frozenset of `(start, end)`
+tuples and filter `SLOT_PRIORITY` against it in `slot_priority_for`.
