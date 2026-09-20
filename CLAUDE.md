@@ -199,6 +199,16 @@ submit_timeout=20.0)`). `timeout` guards cell_click/warmup — those run
   2026-09-07 both 18:30 submits got it _before_ any booking existed and the
   19:30 group then succeeded, so it may be a "slot gone" variant instead —
   the next such run's `context=` log line decides.
+- **Uniform sub-second OCCUPIED means pre-reserved courts, not a bug.** When
+  diagnosing a failed run, check submit latency first. A slot lost to
+  competition answers OCCUPIED after the normal ~3.8–6s submit latency; if
+  _every_ candidate (all hours, both courts) comes back OCCUPIED within ~0.5s
+  of 08:30, the courts were reserved ahead of the public release and were
+  never open to us (2026-09-19 run, target Sat 2026-09-26: all 10 submits
+  OCCUPIED by 08:30:01.6; owner confirmed the advance reservation). Cell-click
+  ACCEPTED does not imply availability — it is only session state. Nothing to
+  fix on such a day; contrast with transport failures (ReadTimeout, no server
+  answer), which are real booker problems.
 - **Password redaction.** All logging must go through
   `src/log.py:build_logger` (filter replaces the password with `***` before
   any handler) — no `print()`, no root logger. Playwright errors can quote
