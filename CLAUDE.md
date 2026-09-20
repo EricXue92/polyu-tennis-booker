@@ -5,8 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A single-purpose script that books a PolyU tennis court 7 days ahead, every
-morning at 08:30 HKT. Runs as a GitHub Actions cron job (entrypoint
-`book-tennis`, defined in `pyproject.toml`).
+morning at 08:30 HKT. Runs as a GitHub Actions `workflow_dispatch` job
+triggered daily by a Cloudflare Worker (entrypoint `book-tennis`, defined in
+`pyproject.toml`).
 
 ## Commands
 
@@ -28,6 +29,10 @@ gh workflow run "Daily Tennis Booking" -f dry_run=true -f skip_sleep=true -f tar
 gh run watch <id> --interval 15 --exit-status                  # block until done
 ```
 
+Cloudflare Worker (trigger + watchdog): `cd infra/cloudflare-worker`, then
+`npx wrangler deploy` / `npx wrangler tail`; PAT rotation and local cron
+testing are in its `README.md`.
+
 `--dry-run` walks the full flow but stops before clicking final Submit (so it
 doesn't actually book a court). `--skip-sleep` runs immediately instead of
 waiting until 08:30 HKT.
@@ -44,7 +49,8 @@ closes the browser, sleeps to 08:30:00.000, and hands off to
 only if every account booked). That orchestrator **skips search**
 and runs two phases over the `(SLOT_PRIORITY × TENNIS_FACILITIES)` candidate
 set: phase 1 fires every candidate's `cell_click()` concurrently via
-`asyncio.gather`; phase 2 groups ACCEPTED cells by `(start, end)` time-slot
+`asyncio.gather` (re-firing timed-out candidates if none was ACCEPTED);
+phase 2 groups ACCEPTED cells by `(start, end)` time-slot
 preserving rank order, fires each group's `submit()` concurrently, and
 **staggers** the groups — group N+1 launches once the earlier groups settle or
 `SUBMIT_STAGGER_SECONDS` (2.5s) elapses, whichever is first. The winner is the
@@ -53,9 +59,9 @@ issues the booking POSTs (make_book.do, make_book_submit.do) over raw httpx —
 no Playwright, no search on the hot path. (`PolyUHttpClient.search()` still
 exists for diagnostic use but isn't called in production.)
 
-Incident history and full design rationale live in `docs/superpowers/specs/`
-and `docs/superpowers/plans/` — read the most recent files there before
-substantive changes.
+Design rationale through 2026-08 lives in `docs/superpowers/specs/` and
+`docs/superpowers/plans/`. Later changes (dual accounts, notify, cell-click
+retry) have no spec — the Invariants below are their only record.
 
 ## Accounts and sites
 
@@ -105,8 +111,8 @@ headers from it — never hardcode a context root in the client.
 
 - **PolyU releases 7-days-ahead slots at EXACTLY 08:30 HKT.** Never let the
   booker run before 08:30 (no `skip_sleep=true` by default, don't remove the
-  `sleep_until_hkt` call, don't lower `TRIGGER_TIME_HKT`). Early sees no
-  slots; late loses popular slots.
+  `asyncio.sleep(seconds_until_hkt_time(...))` calls in `booker.run`, don't
+  lower `TRIGGER_TIME_HKT`). Early sees no slots; late loses popular slots.
 - **An external Cloudflare Worker triggers the workflow**
   (`infra/cloudflare-worker/`) at 07:30 HKT via `workflow_dispatch` — GH
   Actions' scheduled cron proved unreliable, so the workflow has **no
@@ -119,12 +125,13 @@ headers from it — never hardcode a context root in the client.
   slot-open and silently fail. The Worker also hardcodes `ref: "main"`.
 - **Three-phase sleep — do not collapse or skip the warmup.** Sleep to
   08:29:00 → Playwright login + `bootstrap_http_client`, close browser; sleep
-  to 08:29:58 → `client.warmup(n=len(candidates))` (PolyU drops idle
-  keepalives after ~5s, and one warm connection only helps the first
-  concurrent POST, so warmup primes TCP+TLS for every candidate); sleep to
-  08:30:00.000 → fire. Landing every cell-click on a warm connection at
-  exactly 08:30 is the entire point; a cold handshake costs ~5s and loses the
-  run.
+  to 08:29:58 → `client.warmup(n=len(candidates))` (one warm connection only
+  helps the first concurrent POST, so warmup primes TCP+TLS for every
+  candidate); sleep to 08:30:00.000 → fire. Landing every cell-click on a
+  warm connection at exactly 08:30 is the point: a cold first POST took 5.5s
+  on 2026-06-05. (An off-peak cold reconnect measured 100–180ms on
+  2026-09-20, so that cost is mostly 08:30 server load — cold is a handicap,
+  which is why a late warmup fires cold rather than waiting; see next.)
 - **Warmup never delays the trigger.** `booker.warm_all` waits for the warmup
   GETs only until 08:30:00; stragglers keep running in the background (not
   cancelled — they still add warm sockets to the pool) and the fire goes out on
