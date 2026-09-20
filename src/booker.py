@@ -171,6 +171,42 @@ def _failed(account: Account, slots: SlotList, reason: str) -> AccountResult:
     )
 
 
+async def warm_all(
+    jobs: Sequence[AccountJob],
+    *,
+    budget_s: float,
+    log: logging.Logger,
+) -> set[asyncio.Task]:
+    """Warm every account's connection pool, waiting at most `budget_s`.
+
+    Returns the warmups still in flight when the budget ran out (empty on a
+    normal day, when they finish in ~1s). Warmup is best-effort but the trigger
+    time is not: on 2026-09-20 PolyU was slow, the student warmup took 3.76s,
+    and because the trigger waited for it *both* accounts fired at 08:30:01.8.
+    Stragglers are left running rather than cancelled - cancelling closes their
+    half-open connections, whereas letting them finish still adds warm sockets
+    to the pool for the submit phase and any cell-click retry. Starting the
+    warmup earlier is not an option: PolyU drops idle keepalives after ~5s
+    (measured 2026-09-20: reused after 3s idle, reconnected after 6s).
+    """
+    from src.config import TENNIS_FACILITIES
+
+    async def _warm(job: AccountJob) -> None:
+        n = len(job.slots) * len(TENNIS_FACILITIES)
+        job.log.info("warming up %d HTTP connections", n)
+        statuses = await job.client.warmup(n=n)
+        job.log.info("warmup complete (statuses=%s)", statuses)
+
+    tasks = [asyncio.create_task(_warm(j)) for j in jobs]
+    _done, pending = await asyncio.wait(tasks, timeout=budget_s)
+    if pending:
+        log.warning(
+            "%d warmup(s) still in flight at trigger time; firing anyway "
+            "(some cell_clicks may pay a cold handshake)", len(pending),
+        )
+    return pending
+
+
 async def book_all(
     jobs: Sequence[AccountJob],
     target_date: date,
@@ -234,8 +270,6 @@ async def run(
     """Returns 0 when every active account booked, 1 on no-slot or any failure."""
     from playwright.async_api import async_playwright
 
-    from src.config import TENNIS_FACILITIES
-
     log = build_logger("booker", secret="")
 
     target_date = resolve_target_date(target_date_override)
@@ -270,6 +304,7 @@ async def run(
 
     prepared: list[AccountJob] = []
     login_failures: list[AccountResult] = []
+    warm_stragglers: set[asyncio.Task] = set()
     try:
         # Phase 1: Playwright login per account (fresh context each, so the
         # two sites' path-scoped cookies never mix) -> extract session state
@@ -330,13 +365,9 @@ async def run(
             log.info("sleeping %.3fs until HKT %s (pre-warmup)", delay, warmup_target)
             await asyncio.sleep(delay)
 
-            async def _warm(job: AccountJob) -> None:
-                n = len(job.slots) * len(TENNIS_FACILITIES)
-                job.log.info("warming up %d HTTP connections", n)
-                statuses = await job.client.warmup(n=n)
-                job.log.info("warmup complete (statuses=%s)", statuses)
-
-            await asyncio.gather(*(_warm(j) for j in prepared))
+            warm_stragglers = await warm_all(
+                prepared, budget_s=seconds_until_hkt_time(TRIGGER_TIME_HKT), log=log,
+            )
 
             delay = seconds_until_hkt_time(TRIGGER_TIME_HKT)
             log.info("sleeping %.3fs until HKT %s (trigger)", delay, TRIGGER_TIME_HKT)
@@ -347,6 +378,10 @@ async def run(
         await send_report(target_date, results, dry_run=dry_run)
         return overall_rc(results)
     finally:
+        # Don't close a client underneath a warmup that outlived the run.
+        for task in warm_stragglers:
+            task.cancel()
+        await asyncio.gather(*warm_stragglers, return_exceptions=True)
         for job in prepared:
             await job.client.aclose()
 

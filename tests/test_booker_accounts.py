@@ -193,3 +193,54 @@ def test_resolve_target_date_override_parses_iso():
     from src.booker import resolve_target_date
 
     assert resolve_target_date("2026-09-18") == date(2026, 9, 18)
+
+
+class _WarmupClient:
+    def __init__(self, sleep_s: float):
+        self._sleep_s = sleep_s
+        self.warmed: int | None = None
+
+    async def warmup(self, n: int = 1) -> list[int]:
+        import asyncio
+        await asyncio.sleep(self._sleep_s)
+        self.warmed = n
+        return [200] * n
+
+
+@pytest.mark.asyncio
+async def test_warm_all_never_waits_past_its_budget():
+    # 2026-09-20: the student warmup took 3.76s, so *both* accounts fired at
+    # 08:30:01.8. Warmup is best-effort; the trigger time is not.
+    import asyncio
+    import time as _time
+    from src.booker import warm_all
+
+    slots = [(time(18, 30), time(19, 30)), (time(19, 30), time(20, 30))]
+    fast, slow = _WarmupClient(0.0), _WarmupClient(0.5)
+    t0 = _time.perf_counter()
+    stragglers = await warm_all(
+        [_job(STAFF_ACCOUNT, fast, slots), _job(STUDENT_ACCOUNT, slow, slots)],
+        budget_s=0.1, log=logging.getLogger("t"),
+    )
+    assert _time.perf_counter() - t0 < 0.3
+    assert fast.warmed == 4  # one connection per candidate (2 slots x 2 courts)
+    # The straggler is left running, not cancelled: cancelling would close its
+    # half-open connections, while letting it finish still adds them to the pool.
+    assert len(stragglers) == 1 and not stragglers.pop().cancelled()
+    await asyncio.sleep(0.6)
+    assert slow.warmed == 4
+
+
+@pytest.mark.asyncio
+async def test_warm_all_returns_as_soon_as_every_account_is_warm():
+    import time as _time
+    from src.booker import warm_all
+
+    slots = [(time(18, 30), time(19, 30))]
+    t0 = _time.perf_counter()
+    stragglers = await warm_all(
+        [_job(STAFF_ACCOUNT, _WarmupClient(0.0), slots)],
+        budget_s=5.0, log=logging.getLogger("t"),
+    )
+    assert not stragglers
+    assert _time.perf_counter() - t0 < 0.5

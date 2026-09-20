@@ -751,7 +751,10 @@ async def test_client_sets_connection_pool_limits():
         # httpx.Limits is stored on the transport pool; access via the private
         # _pool attribute. Brittle vs httpx internals but worth the lock-in.
         pool = client._http._transport._pool
-        assert pool._max_connections == 8
+        # 8 keepalive sockets cover the largest candidate set (6); the extra
+        # max_connections headroom lets cell_clicks open fresh connections
+        # when warmup GETs are still in flight at 08:30 (2026-09-20).
+        assert pool._max_connections == 16
         assert pool._max_keepalive_connections == 8
     finally:
         await client.aclose()
@@ -1037,3 +1040,25 @@ async def test_cell_click_unexpected_logs_page_message_not_html_head(caplog):
     assert "context=" in msg
     assert "exceeded your booking not allowed" in msg
     assert "<!DOCTYPE" not in msg
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_cell_click_timeout_override_keeps_short_connect_budget():
+    # Retry rounds pass a longer budget (http_booker.CELL_RETRY_TIMEOUT_SECONDS);
+    # it must widen read/write only - connect stays on the client's short budget,
+    # same split as submit_timeout.
+    from src.http_client import PolyUHttpClient
+
+    route = respx.post(
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"
+    ).mock(return_value=Response(302, headers={"location": "make_book_submit.do"}))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        await client.cell_click(_slot_11_at_1230())
+        await client.cell_click(_slot_11_at_1230(), timeout=15.0)
+    finally:
+        await client.aclose()
+    default, override = (c.request.extensions["timeout"] for c in route.calls)
+    assert default["read"] == 6.0 and default["connect"] == 6.0
+    assert override["read"] == 15.0 and override["connect"] == 6.0

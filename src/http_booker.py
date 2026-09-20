@@ -35,6 +35,14 @@ ever changes.
 
 Cell-click ERROR_TRANSIENT and ERROR_FATAL are tolerated at the candidate
 level - a facility-specific failure does not poison sibling candidates.
+
+Cell-click retry. When a round ends with nothing ACCEPTED but some candidates
+ERROR_TRANSIENT, those candidates are re-fired (see CELL_RETRY_* below) until
+one is ACCEPTED, none is transient any more, or the window closes. On
+2026-09-20 PolyU was slow at 08:30, all 10 cell_clicks (both accounts) died on
+the 6s ReadTimeout, and the run quit at 08:30:07 - while 19:30 stayed free
+long enough for the owner to book it by hand. A timeout says nothing about
+the slot, so giving up on it is never right.
 """
 from __future__ import annotations
 
@@ -60,10 +68,24 @@ from src.http_client import (
 # window. Lower it to favour the fallback, raise it to favour strict priority.
 SUBMIT_STAGGER_SECONDS = 2.5
 
+# Cell-click retry (only when a round produced no ACCEPTED at all).
+# WINDOW: how long after the first round new retry rounds may still start.
+# TIMEOUT: per-request budget for retries. The first round keeps the client's
+#   short default because a hung cell_click stalls ready submits behind it;
+#   a retry round has nothing ready to stall, and on a day when PolyU needs
+#   >6s per request a second 6s attempt would just time out again.
+# MIN_ROUND: floor on a round's duration so instant failures (connection
+#   refused, 503) are paced instead of hammering the server.
+CELL_RETRY_WINDOW_SECONDS = 45.0
+CELL_RETRY_TIMEOUT_SECONDS = 15.0
+CELL_RETRY_MIN_ROUND_SECONDS = 1.0
+
 
 class _ClientLike(Protocol):
     """Minimal subset of PolyUHttpClient used by the orchestrator."""
-    async def cell_click(self, slot: AvailableSlot) -> CellClickResult: ...
+    async def cell_click(
+        self, slot: AvailableSlot, *, timeout: float | None = None,
+    ) -> CellClickResult: ...
     async def submit(self, slot: AvailableSlot) -> BookingResult: ...
 
 
@@ -104,10 +126,14 @@ async def book_via_http(
     *,
     log: logging.Logger,
     stagger_s: float = SUBMIT_STAGGER_SECONDS,
+    cell_retry_window_s: float = CELL_RETRY_WINDOW_SECONDS,
+    cell_retry_min_round_s: float = CELL_RETRY_MIN_ROUND_SECONDS,
 ) -> int:
     """Run the booking flow. Returns 0 on SUCCESS, 1 otherwise."""
     outcome = await book_via_http_outcome(
         client, target_date, slots, dry_run, log=log, stagger_s=stagger_s,
+        cell_retry_window_s=cell_retry_window_s,
+        cell_retry_min_round_s=cell_retry_min_round_s,
     )
     return outcome.rc
 
@@ -120,6 +146,8 @@ async def book_via_http_outcome(
     *,
     log: logging.Logger,
     stagger_s: float = SUBMIT_STAGGER_SECONDS,
+    cell_retry_window_s: float = CELL_RETRY_WINDOW_SECONDS,
+    cell_retry_min_round_s: float = CELL_RETRY_MIN_ROUND_SECONDS,
 ) -> BookingOutcome:
     """Run the parallel cell-click + staggered time-grouped submit flow.
 
@@ -136,15 +164,53 @@ async def book_via_http_outcome(
     # return_exceptions=False - cell_click catches httpx.HTTPError internally
     # and returns ERROR_TRANSIENT. Any uncaught exception is a real bug and
     # should crash the run with a traceback in CI, not be silently swallowed.
-    cell_results: list[CellClickResult] = await asyncio.gather(
+    cell_results: list[CellClickResult] = list(await asyncio.gather(
         *(client.cell_click(slot) for slot in candidates)
-    )
+    ))
 
     for rank, cr in enumerate(cell_results):
         log.info(
             "rank=%d %s: cell=%s (latency=%dms)",
             rank, cr.slot.facility_name, cr.outcome.name, cr.latency_ms,
         )
+
+    # Phase 1b: nothing ACCEPTED but some candidates merely timed out / 5xx'd -
+    # re-fire those until one lands, none is transient any more, or the window
+    # closes. Skipped as soon as anything is ACCEPTED: a ready submit must not
+    # wait on a slow sibling.
+    loop = asyncio.get_running_loop()
+    retry_deadline = loop.time() + cell_retry_window_s
+    attempt = 1
+    while loop.time() < retry_deadline:
+        if any(cr.outcome is CellOutcome.ACCEPTED for cr in cell_results):
+            break
+        retry_ranks = [
+            rank for rank, cr in enumerate(cell_results)
+            if cr.outcome is CellOutcome.ERROR_TRANSIENT
+        ]
+        if not retry_ranks:
+            break
+        attempt += 1
+        log.warning(
+            "no cell_click ACCEPTED, %d ERROR_TRANSIENT; retrying them "
+            "(attempt %d, timeout=%.0fs)",
+            len(retry_ranks), attempt, CELL_RETRY_TIMEOUT_SECONDS,
+        )
+        round_start = loop.time()
+        retried = await asyncio.gather(*(
+            client.cell_click(candidates[rank], timeout=CELL_RETRY_TIMEOUT_SECONDS)
+            for rank in retry_ranks
+        ))
+        for rank, cr in zip(retry_ranks, retried):
+            cell_results[rank] = cr
+            log.info(
+                "attempt=%d rank=%d %s: cell=%s (latency=%dms)",
+                attempt, rank, cr.slot.facility_name, cr.outcome.name, cr.latency_ms,
+            )
+        if not any(cr.outcome is CellOutcome.ACCEPTED for cr in retried):
+            pause = cell_retry_min_round_s - (loop.time() - round_start)
+            if pause > 0:
+                await asyncio.sleep(pause)
 
     accepted = [
         (rank, cr.slot)
@@ -153,8 +219,8 @@ async def book_via_http_outcome(
     ]
     if not accepted:
         log.warning(
-            "no cell_click ACCEPTED; exiting 1 (results: %s)",
-            [cr.outcome.name for cr in cell_results],
+            "no cell_click ACCEPTED after %d attempt(s); exiting 1 (results: %s)",
+            attempt, [cr.outcome.name for cr in cell_results],
         )
         return BookingOutcome(1)
 

@@ -9,7 +9,9 @@ book_via_http:
        - Any SUCCESS wins (lower-rank preferred if multiple); return 0.
        - No SUCCESS + any ERROR_FATAL -> abort; return 1.
        - No SUCCESS + only OCCUPIED/TRANSIENT -> advance to next group.
-  5. If 0 ACCEPTED, return 1 (no submit calls).
+  5. If 0 ACCEPTED: re-fire the ERROR_TRANSIENT candidates (longer timeout)
+     until one is ACCEPTED, none is transient, or the retry window closes;
+     still 0 ACCEPTED -> return 1 (no submit calls).
   6. If all groups exhausted with no SUCCESS, return 1.
 """
 import asyncio
@@ -28,6 +30,7 @@ class _FakeClient:
 
     cell_click_outcomes / submit_results are dicts keyed by (start_hour, facility_id)
     so tests can express intent without depending on candidate construction order.
+    A cell_click outcome may be a list to script successive attempts (retry rounds).
     submit_sleeps optionally injects per-candidate latency to verify intra-group
     parallelism / inter-group serialization.
     """
@@ -43,15 +46,20 @@ class _FakeClient:
         self._sleep = cell_click_sleep_s
         self._sub_sleeps = submit_sleeps or {}
         self.cell_click_calls = []
+        self.cell_click_timeouts: list[float | None] = []
         self.submit_calls = []
         self.submit_call_times: list[float] = []
 
-    async def cell_click(self, slot):
+    async def cell_click(self, slot, *, timeout=None):
         self.cell_click_calls.append(slot)
+        self.cell_click_timeouts.append(timeout)
         if self._sleep:
             await asyncio.sleep(self._sleep)
         key = (slot.start_dt.hour, slot.facility_id)
         outcome = self._cell[key]
+        if isinstance(outcome, list):
+            # Scripted per-attempt outcomes; the last one repeats forever.
+            outcome = outcome.pop(0) if len(outcome) > 1 else outcome[0]
         return CellClickResult(slot=slot, outcome=outcome, latency_ms=10)
 
     async def submit(self, slot):
@@ -267,9 +275,96 @@ async def test_all_cell_errors_returns_1():
     cells = _all_cell(CellOutcome.ERROR_TRANSIENT)
     cells[(18, _FACILITY_IDS[1])] = CellOutcome.ERROR_FATAL
     client = _FakeClient(cell_click_outcomes=cells)
-    rc = await book_via_http(client, date(2026, 6, 10), _PRIORITY, dry_run=False, log=_LOG)
+    rc = await book_via_http(
+        client, date(2026, 6, 10), _PRIORITY, dry_run=False, log=_LOG,
+        cell_retry_window_s=0.0,
+    )
     assert rc == 1
     assert len(client.submit_calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_all_cell_transient_is_retried_until_accepted():
+    # 2026-09-20: every cell_click hit the 6s ReadTimeout at 08:30 and the run
+    # gave up at 08:30:07 while 19:30 sat free for hours. A round with no
+    # ACCEPTED must re-fire its ERROR_TRANSIENT candidates, on a longer budget.
+    from src.http_booker import CELL_RETRY_TIMEOUT_SECONDS, book_via_http
+
+    cells = {k: [CellOutcome.ERROR_TRANSIENT, CellOutcome.ACCEPTED]
+             for k in _all_cell(CellOutcome.ACCEPTED)}
+    client = _FakeClient(
+        cell_click_outcomes=cells,
+        submit_results={**_all_submit(BookingResult.OCCUPIED),
+                        (18, _FACILITY_IDS[0]): BookingResult.SUCCESS},
+    )
+    rc = await book_via_http(
+        client, date(2026, 6, 10), _PRIORITY, dry_run=False, log=_LOG,
+        cell_retry_min_round_s=0.0,
+    )
+    assert rc == 0
+    assert len(client.cell_click_calls) == 8
+    # First round keeps the short client default; retries get the long budget.
+    assert client.cell_click_timeouts == [None] * 4 + [CELL_RETRY_TIMEOUT_SECONDS] * 4
+
+
+@pytest.mark.asyncio
+async def test_cell_retry_only_refires_transient_candidates():
+    # 18:30 is definitively OCCUPIED; only the timed-out 19:30 pair is retried.
+    from src.http_booker import book_via_http
+
+    cells = {
+        (18, _FACILITY_IDS[0]): CellOutcome.OCCUPIED,
+        (18, _FACILITY_IDS[1]): CellOutcome.OCCUPIED,
+        (19, _FACILITY_IDS[0]): [CellOutcome.ERROR_TRANSIENT, CellOutcome.ACCEPTED],
+        (19, _FACILITY_IDS[1]): [CellOutcome.ERROR_TRANSIENT, CellOutcome.OCCUPIED],
+    }
+    client = _FakeClient(
+        cell_click_outcomes=cells,
+        submit_results={(19, _FACILITY_IDS[0]): BookingResult.SUCCESS},
+    )
+    rc = await book_via_http(
+        client, date(2026, 6, 10), _PRIORITY, dry_run=False, log=_LOG,
+        cell_retry_min_round_s=0.0,
+    )
+    assert rc == 0
+    assert [s.start_dt.hour for s in client.cell_click_calls] == [18, 18, 19, 19, 19, 19]
+    assert [s.start_dt.hour for s in client.submit_calls] == [19]
+
+
+@pytest.mark.asyncio
+async def test_cell_retry_gives_up_after_window():
+    # A server that never answers must still end the run (exit 1), and the
+    # retry rounds must be paced rather than spinning.
+    from src.http_booker import book_via_http
+
+    client = _FakeClient(cell_click_outcomes=_all_cell(CellOutcome.ERROR_TRANSIENT))
+    t0 = time.perf_counter()
+    rc = await book_via_http(
+        client, date(2026, 6, 10), _PRIORITY, dry_run=False, log=_LOG,
+        cell_retry_window_s=0.3, cell_retry_min_round_s=0.1,
+    )
+    elapsed = time.perf_counter() - t0
+    assert rc == 1
+    assert len(client.submit_calls) == 0
+    rounds = len(client.cell_click_calls) // 4
+    assert 2 <= rounds <= 5, f"expected paced retry rounds, got {rounds}"
+    assert elapsed < 1.0
+
+
+@pytest.mark.asyncio
+async def test_no_cell_retry_once_any_candidate_is_accepted():
+    # A timed-out sibling is not worth delaying submits that are ready to go.
+    from src.http_booker import book_via_http
+
+    cells = _all_cell(CellOutcome.ERROR_TRANSIENT)
+    cells[(19, _FACILITY_IDS[1])] = CellOutcome.ACCEPTED
+    client = _FakeClient(
+        cell_click_outcomes=cells,
+        submit_results={(19, _FACILITY_IDS[1]): BookingResult.SUCCESS},
+    )
+    rc = await book_via_http(client, date(2026, 6, 10), _PRIORITY, dry_run=False, log=_LOG)
+    assert rc == 0
+    assert len(client.cell_click_calls) == 4
 
 
 @pytest.mark.asyncio

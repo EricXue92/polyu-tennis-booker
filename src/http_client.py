@@ -256,14 +256,19 @@ class PolyUHttpClient:
         self.fb_user_id = fb_user_id
         # Connect stays on the short budget: at 08:30 the pool is already warm,
         # so a slow handshake means something is wrong, not that we're queued.
+        self._connect_timeout = timeout
         self._submit_timeout = httpx.Timeout(submit_timeout, connect=timeout)
         self._http = httpx.AsyncClient(
             cookies=cookies,
             headers=_DEFAULT_HEADERS,
             timeout=timeout,
             follow_redirects=False,  # We need to inspect 302 Location ourselves.
+            # Normally only the warm keepalive sockets are used. The headroom
+            # above them is for a run whose warmup GETs are still in flight at
+            # 08:30 (booker.warm_all fires regardless): the cell_clicks must be
+            # able to open fresh connections instead of queueing on the pool.
             limits=httpx.Limits(
-                max_connections=8,
+                max_connections=16,
                 max_keepalive_connections=8,
             ),
         )
@@ -373,8 +378,15 @@ class PolyUHttpClient:
                     ))
         return out
 
-    async def cell_click(self, slot: AvailableSlot) -> CellClickResult:
+    async def cell_click(
+        self, slot: AvailableSlot, *, timeout: float | None = None,
+    ) -> CellClickResult:
         """POST make_book.do for one (facility, time) candidate.
+
+        `timeout` overrides the client's short default for this request only
+        (connect stays short). The orchestrator passes it on retry rounds,
+        where nothing is queued behind the cell_click - see
+        src/http_booker.py:CELL_RETRY_TIMEOUT_SECONDS.
 
         Returns CellClickResult with one of:
           ACCEPTED        - 302 -> make_book_submit.do; slot is server-side held,
@@ -427,6 +439,10 @@ class PolyUHttpClient:
             resp = await self._http.post(
                 self.site.make_book_url,
                 data=cell_form,
+                timeout=(
+                    httpx.USE_CLIENT_DEFAULT if timeout is None
+                    else httpx.Timeout(timeout, connect=self._connect_timeout)
+                ),
                 headers={
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     "Origin": _ORIGIN,

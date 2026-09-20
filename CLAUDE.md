@@ -119,12 +119,21 @@ headers from it — never hardcode a context root in the client.
   slot-open and silently fail. The Worker also hardcodes `ref: "main"`.
 - **Three-phase sleep — do not collapse or skip the warmup.** Sleep to
   08:29:00 → Playwright login + `bootstrap_http_client`, close browser; sleep
-  to 08:29:58 → `client.warmup(n=len(candidates))` (servers drop idle
-  keepalives within 15–30s, and one warm connection only helps the first
+  to 08:29:58 → `client.warmup(n=len(candidates))` (PolyU drops idle
+  keepalives after ~5s, and one warm connection only helps the first
   concurrent POST, so warmup primes TCP+TLS for every candidate); sleep to
   08:30:00.000 → fire. Landing every cell-click on a warm connection at
   exactly 08:30 is the entire point; a cold handshake costs ~5s and loses the
   run.
+- **Warmup never delays the trigger.** `booker.warm_all` waits for the warmup
+  GETs only until 08:30:00; stragglers keep running in the background (not
+  cancelled — they still add warm sockets to the pool) and the fire goes out on
+  time, `max_connections=16` leaving room for cold connections beside them. On
+  2026-09-20 the student warmup took 3.76s and, because the trigger awaited it,
+  _both_ accounts fired at 08:30:01.8. Do not "fix" slow warmups by starting
+  them earlier: PolyU drops idle keepalives after ~5s (measured 2026-09-20:
+  reused after 3s idle, reconnected after 6s), so `WARMUP_LEAD_SECONDS` must
+  stay small.
 - **No search on the hot path.** PolyU's Search endpoint takes ~4.5s
   server-side — long enough to lose every desired slot. `book_via_http`
   fabricates `AvailableSlot`s from the candidate set and goes straight to
@@ -141,6 +150,14 @@ headers from it — never hardcode a context root in the client.
   not an error. Do not reintroduce serial submits or serial _groups_: one
   hung rank-0 submit once locked out all its siblings, and strictly serial
   groups cost 7 consecutive runs in 2026-08 (see below).
+- **Cell-click timeouts are retried, never final.** If a round ends with no
+  ACCEPTED but some ERROR_TRANSIENT, `book_via_http` re-fires just those
+  candidates (`CELL_RETRY_*` in `http_booker.py`: new rounds start for up to
+  45s, 15s per-request budget, rounds paced ≥1s) until one is ACCEPTED, none
+  is transient, or the window closes. 2026-09-20: PolyU was slow at 08:30, all
+  10 cell_clicks (both accounts) hit the 6s ReadTimeout, the run quit at
+  08:30:07, and 19:30 stayed free until the owner booked it by hand. No retry
+  once anything is ACCEPTED — a ready submit must not wait on a slow sibling.
 - **Submit groups are staggered, never serialized** (`SUBMIT_STAGGER_SECONDS
 = 2.5` in `http_booker.py`). Root cause of the 2026-08-19..2026-08-27
   outage (7 lost runs, 1 win): every 18:30 submit hung past the 6s client
@@ -159,7 +176,8 @@ headers from it — never hardcode a context root in the client.
 - **Two timeout budgets, not one** (`PolyUHttpClient(timeout=6.0,
 submit_timeout=20.0)`). `timeout` guards cell_click/warmup — those run
   150–300ms warm and are all gathered together, so one hang stalls the whole
-  submit phase. `submit_timeout` guards `make_book_submit.do`, which does the
+  submit phase (cell-click _retry_ rounds get 15s instead: nothing is queued
+  behind them). `submit_timeout` guards `make_book_submit.do`, which does the
   real transactional work and legitimately takes 4–6s+ at 08:30; connect
   stays on the short budget since the pool is already warm. A single shared
   6s budget sat in the middle of the submit latency distribution and killed
@@ -178,7 +196,7 @@ submit_timeout=20.0)`). `timeout` guards cell_click/warmup — those run
   PolyU error pages are ~30 KB of chrome around a one-line message, and a raw
   `body[:300]` preview never reached it. Open question as of 2026-09-16: the
   29640-byte ERROR_FATAL page is assumed to be the quota page, but on
-  2026-09-07 both 18:30 submits got it *before* any booking existed and the
+  2026-09-07 both 18:30 submits got it _before_ any booking existed and the
   19:30 group then succeeded, so it may be a "slot gone" variant instead —
   the next such run's `context=` log line decides.
 - **Password redaction.** All logging must go through
