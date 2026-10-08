@@ -75,8 +75,8 @@ the run out. Each `PolyUHttpClient` is bound to one `Site` and derives its
 URLs and Referer headers from it — never hardcode a context root in the
 client.
 
-- **Staff** (`POLYU_USERNAME`/`POLYU_PASSWORD`): the daily booker, rule
-  `slot_priority_for` (see weekday adjustments below).
+- **Staff** (`POLYU_USERNAME`/`POLYU_PASSWORD`): weekends only since
+  2026-10-08, rule `slot_priority_for`.
 - **Student** (`POLYU_STUDENT_USERNAME`/`POLYU_STUDENT_PASSWORD`): weekends
   only, rule `student_slot_priority_for`. The owner wants two consecutive
   weekend hours, one per account, so the evening is split by parity: staff
@@ -85,11 +85,9 @@ client.
   other, so this static split is the only thing preventing overlap — never
   give either account a weekend fallback on the other's hours.
 - **Student2** (`POLYU_STUDENT2_USERNAME`/`POLYU_STUDENT2_PASSWORD`, student
-  site): one-off, rule `student2_slot_priority_for`. Active only for target
-  dates in `STUDENT2_TARGET_DATES` (2026-09-28, 09-30, 10-02), trying 20:30 →
-  21:30. Staff still runs its weekday rule those days, so both can land on
-  20:30 (different courts); nothing prevents that. Empty the set after
-  2026-10-02.
+  site): Wednesday and Friday targets only (`_STUDENT2_WEEKDAYS`), rule
+  `student2_slot_priority_for`, trying `SLOT_PRIORITY` (any one hour of
+  18:30–21:30). It is the only account active those days.
 - **Student result email.** Accounts with `notify_result=True` (only
   `student`) get their outcome emailed after every run they take part in;
   weekday runs send nothing. `src/notify.py` uses Gmail SMTP
@@ -229,9 +227,10 @@ Check latencies before suspecting the code:
 
 ## Tuning knobs
 
-- Slot preferences: `SLOT_PRIORITY` in `src/config.py` (tuple of
-  `(start, end)`, tried in order). Weekdays run 18:30 → 19:30 → 20:30; the
-  third rung is cheap insurance on contested evenings `[2026-09-16]`.
+- Slot preferences: per-account rules in `src/config.py` (tuples of
+  `(start, end)`, tried in order). `SLOT_PRIORITY` (18:30 → 19:30 → 20:30) is
+  the weekday ladder student2 uses; the third rung is cheap insurance on
+  contested evenings `[2026-09-16]`.
 - Trigger time: `TRIGGER_TIME_HKT` in `src/config.py`.
 - Days-ahead window: `DAYS_AHEAD` in `src/dates.py`.
 - Submit stagger / cell-click retry: `SUBMIT_STAGGER_SECONDS`, `CELL_RETRY_*`
@@ -239,18 +238,13 @@ Check latencies before suspecting the code:
 
 ## Weekday-specific adjustments
 
-`config.slot_priority_for(target_date)` adjusts `SLOT_PRIORITY` per weekday
-before sessions are created. When every account's rule returns `()`, `run()`
-short-circuits with exit 0 (no sleep, no Playwright launch) — the watchdog
-treats the day as accounted for and does not open an issue. Currently:
+Each account's rule in `src/config.py` decides which target weekdays it books.
+When every account's rule returns `()`, `run()` short-circuits with exit 0
+(no sleep, no Playwright launch) — the watchdog treats the day as accounted
+for and does not open an issue. Currently (since 2026-10-08):
 
-- **Tuesday is a rest day.** `target_date.weekday() == 1` is in
-  `_REST_WEEKDAYS` (owner's preference).
-- **Weekends split hours between the two accounts.** Saturday/Sunday targets
-  return `_STAFF_WEEKEND_SLOTS` (18:30, 20:30) for staff and
-  `_STUDENT_WEEKEND_SLOTS` (17:30, 19:30, 21:30) for student — see "Accounts
-  and sites" for why the parity split matters.
-
-Add new rest weekdays to `_REST_WEEKDAYS`. For partial exclusions (some slots
-skipped but the day still booked), reintroduce a frozenset of `(start, end)`
-tuples and filter `SLOT_PRIORITY` against it in `slot_priority_for`.
+- **Mon / Tue / Thu:** nobody books.
+- **Wed / Fri:** student2 only, 18:30 → 19:30 → 20:30.
+- **Sat / Sun:** staff takes `_STAFF_WEEKEND_SLOTS` (18:30, 20:30), student
+  takes `_STUDENT_WEEKEND_SLOTS` (17:30, 19:30, 21:30) — see "Accounts and
+  sites" for why the parity split matters.

@@ -4,14 +4,11 @@ from datetime import date, time
 from src.config import SLOT_PRIORITY, slot_priority_for
 
 
-def test_weekday_returns_base_priority():
-    # 2026-09-04 is a Friday.
-    assert slot_priority_for(date(2026, 9, 4)) == SLOT_PRIORITY
-
-
-def test_tuesday_is_rest_day():
-    # 2026-09-01 is a Tuesday.
-    assert slot_priority_for(date(2026, 9, 1)) == ()
+def test_staff_sits_out_weekdays():
+    # Mon 2026-09-14 .. Fri 2026-09-18: weekdays are student2's (Wed/Fri) or
+    # nobody's since 2026-10-08.
+    for day in range(14, 19):
+        assert slot_priority_for(date(2026, 9, day)) == ()
 
 
 def test_saturday_staff_takes_even_hours_only():
@@ -83,28 +80,25 @@ def test_weekend_staff_and_student_slots_never_overlap():
         assert staff.isdisjoint(student)
 
 
-def test_student2_books_late_evening_on_its_target_dates_only():
-    from src.config import STUDENT2_TARGET_DATES, student2_slot_priority_for
-
-    assert STUDENT2_TARGET_DATES == {
-        date(2026, 9, 28), date(2026, 9, 30), date(2026, 10, 2),  # Mon, Wed, Fri
-    }
-    expected = (
-        (time(20, 30), time(21, 30)),
-        (time(21, 30), time(22, 30)),
-    )
-    for d in STUDENT2_TARGET_DATES:
-        assert student2_slot_priority_for(d) == expected
-
-
-def test_student2_sits_out_every_other_date():
+def test_student2_books_evening_ladder_on_wednesday_and_friday():
     from src.config import student2_slot_priority_for
 
-    # The days around and between the targets, incl. the same weekdays a week
-    # earlier/later — the rule is date-based, not weekday-based.
+    expected = (
+        (time(18, 30), time(19, 30)),
+        (time(19, 30), time(20, 30)),
+        (time(20, 30), time(21, 30)),
+    )
+    assert SLOT_PRIORITY == expected
+    assert student2_slot_priority_for(date(2026, 10, 14)) == expected  # Wednesday
+    assert student2_slot_priority_for(date(2026, 10, 16)) == expected  # Friday
+
+
+def test_student2_sits_out_other_days():
+    from src.config import student2_slot_priority_for
+
     for d in (
-        date(2026, 9, 21), date(2026, 9, 27), date(2026, 9, 29),
-        date(2026, 10, 1), date(2026, 10, 3), date(2026, 10, 5),
+        date(2026, 10, 12), date(2026, 10, 13), date(2026, 10, 15),  # Mon, Tue, Thu
+        date(2026, 10, 17), date(2026, 10, 18),  # Sat, Sun
     ):
         assert student2_slot_priority_for(d) == ()
 
@@ -126,14 +120,3 @@ def test_accounts_staff_first_then_students():
         "student", STUDENT_SITE, "POLYU_STUDENT_USERNAME", "POLYU_STUDENT_PASSWORD")
     assert student.slot_priority is student_slot_priority_for
     assert STUDENT_SITE.base_path == "starspossfbstud"
-
-
-def test_weekday_priority_falls_back_to_2030_after_prime_hours():
-    # 2026-09-23 is a Wednesday. Weekday targets lost 18:30 and 19:30 on both
-    # courts four Wednesdays running (2026-08-26 .. 2026-09-16), so a third
-    # rung at 20:30 gives the run a live shot instead of exiting empty-handed.
-    assert slot_priority_for(date(2026, 9, 23)) == (
-        (time(18, 30), time(19, 30)),
-        (time(19, 30), time(20, 30)),
-        (time(20, 30), time(21, 30)),
-    )

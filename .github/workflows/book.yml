@@ -35,8 +35,8 @@ jobs:
       # (src/config.py); the booker never reads these on other days.
       POLYU_STUDENT_USERNAME: ${{ secrets.POLYU_STUDENT_USERNAME }}
       POLYU_STUDENT_PASSWORD: ${{ secrets.POLYU_STUDENT_PASSWORD }}
-      # Second student account (starspossfbstud). Only used on
-      # STUDENT2_TARGET_DATES (src/config.py).
+      # Second student account (starspossfbstud). Only used on Wednesday
+      # and Friday targets (src/config.py).
       POLYU_STUDENT2_USERNAME: ${{ secrets.POLYU_STUDENT2_USERNAME }}
       POLYU_STUDENT2_PASSWORD: ${{ secrets.POLYU_STUDENT2_PASSWORD }}
       # Result email for the `student` account (src/notify.py): Gmail address

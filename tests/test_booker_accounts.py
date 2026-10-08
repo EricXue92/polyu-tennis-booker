@@ -30,25 +30,24 @@ def test_active_jobs_both_accounts_on_weekend():
     ]
 
 
-def test_active_jobs_staff_only_on_ordinary_day():
+def test_active_jobs_student2_only_on_wednesday_and_friday():
     from src.booker import active_jobs
 
-    jobs = active_jobs(date(2026, 9, 17), ACCOUNTS)  # Thursday
-    assert [a.name for a, _ in jobs] == ["staff"]
+    for d in (date(2026, 10, 14), date(2026, 10, 16)):  # Wednesday, Friday
+        jobs = active_jobs(d, ACCOUNTS)
+        assert [a.name for a, _ in jobs] == ["student2"]
+        assert jobs[0][1] == [
+            (time(18, 30), time(19, 30)),
+            (time(19, 30), time(20, 30)),
+            (time(20, 30), time(21, 30)),
+        ]
 
 
-def test_active_jobs_staff_and_student2_on_student2_target_date():
+def test_active_jobs_empty_on_monday_tuesday_thursday():
     from src.booker import active_jobs
 
-    jobs = active_jobs(date(2026, 9, 28), ACCOUNTS)  # Monday, a student2 date
-    assert [a.name for a, _ in jobs] == ["staff", "student2"]
-    assert jobs[1][1] == [(time(20, 30), time(21, 30)), (time(21, 30), time(22, 30))]
-
-
-def test_active_jobs_empty_on_rest_day():
-    from src.booker import active_jobs
-
-    assert active_jobs(date(2026, 9, 15), ACCOUNTS) == []  # Tuesday
+    for d in (date(2026, 10, 12), date(2026, 10, 13), date(2026, 10, 15)):
+        assert active_jobs(d, ACCOUNTS) == []
 
 
 @pytest.mark.asyncio
