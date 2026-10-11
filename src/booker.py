@@ -143,8 +143,8 @@ def active_jobs(
 ) -> list[tuple[Account, SlotList]]:
     """Return (account, slots) for every account that books on target_date.
 
-    An account whose slot rule returns an empty tuple (rest day, or the
-    student account on a weekday) is left out entirely.
+    An account whose slot rule returns an empty tuple (e.g. the staff
+    account on a weekday) is left out entirely.
     """
     jobs: list[tuple[Account, SlotList]] = []
     for account in accounts:
@@ -277,7 +277,7 @@ async def run(
 
     jobs = active_jobs(target_date)
     if not jobs:
-        # Rest weekday (e.g. Tuesday): nothing to book. Exit 0 so the
+        # No account's rule covers this date: nothing to book. Exit 0 so the
         # watchdog treats the day as accounted for and doesn't open an issue.
         log.info("no slots configured for %s (rest day); skipping run", target_date)
         return 0

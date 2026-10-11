@@ -5,8 +5,8 @@ from src.config import SLOT_PRIORITY, slot_priority_for
 
 
 def test_staff_sits_out_weekdays():
-    # Mon 2026-09-14 .. Fri 2026-09-18: weekdays are student2's (Wed/Fri) or
-    # nobody's since 2026-10-08.
+    # Mon 2026-09-14 .. Fri 2026-09-18: weekdays belong to the student
+    # accounts since 2026-10-08.
     for day in range(14, 19):
         assert slot_priority_for(date(2026, 9, day)) == ()
 
@@ -63,11 +63,14 @@ def test_student_books_odd_hours_on_weekends():
     assert student_slot_priority_for(date(2026, 9, 20)) == expected  # Sunday
 
 
-def test_student_sits_out_weekdays():
+def test_student_books_only_1830_on_weekdays():
     from src.config import student_slot_priority_for
 
+    # One rung, no fallback: the owner wants 18:30-19:30 or nothing.
     for day in range(14, 19):  # Mon 2026-09-14 .. Fri 2026-09-18
-        assert student_slot_priority_for(date(2026, 9, day)) == ()
+        assert student_slot_priority_for(date(2026, 9, day)) == (
+            (time(18, 30), time(19, 30)),
+        )
 
 
 def test_weekend_staff_and_student_slots_never_overlap():

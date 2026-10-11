@@ -75,7 +75,7 @@ TENNIS_FACILITIES = {
 
 # Weekday evening ladder: any one hour between 18:30 and 21:30, tried in
 # order. Used by student2 on its weekdays (the staff account stopped booking
-# weekdays on 2026-10-08). 20:30 was added 2026-09-16 after weekday targets
+# weekdays on 2026-10-08; `student` takes only the first rung, see below). 20:30 was added 2026-09-16 after weekday targets
 # lost both prime hours on both courts four Wednesdays running
 # (2026-08-26 .. 2026-09-16), so a third rung gives the run a live shot.
 SLOT_PRIORITY: tuple[tuple[time, time], ...] = (
@@ -107,25 +107,34 @@ _STUDENT_WEEKEND_SLOTS: tuple[tuple[time, time], ...] = (
 def slot_priority_for(target_date: date) -> tuple[tuple[time, time], ...]:
     """Staff slot rule: weekends only, even hours only; sits out weekdays.
 
-    The owner stopped weekday staff bookings on 2026-10-08 — weekdays are
-    student2's now.
+    The owner stopped weekday staff bookings on 2026-10-08 — weekdays belong
+    to the student accounts now.
     """
     if target_date.weekday() in _WEEKEND_WEEKDAYS:
         return _STAFF_WEEKEND_SLOTS
     return ()
 
 
+# On weekdays the student account wants 18:30-19:30 or nothing: one rung, no
+# fallback, so a lost 18:30 ends the run with exit 1 (owner's choice,
+# 2026-10-11). On Wed/Fri it fires alongside student2, whose first rung is the
+# same hour — the two can each take a court, or student2 falls to a later rung.
+_STUDENT_WEEKDAY_SLOTS: tuple[tuple[time, time], ...] = (
+    (time(18, 30), time(19, 30)),
+)
+
+
 def student_slot_priority_for(target_date: date) -> tuple[tuple[time, time], ...]:
-    """Student slot rule: weekends only, odd hours only; sits out weekdays."""
+    """Student slot rule: odd hours on weekends, 18:30 only on weekdays."""
     if target_date.weekday() in _WEEKEND_WEEKDAYS:
         return _STUDENT_WEEKEND_SLOTS
-    return ()
+    return _STUDENT_WEEKDAY_SLOTS
 
 
 # --- Second student account: Wednesdays and Fridays ---
 # A different student login (starspossfbstud) that books any one hour of the
 # 18:30-21:30 evening on Wednesday and Friday targets; every other day it
-# sits out. It is the only account active those days.
+# sits out. `student` is also active those days, on 18:30 only.
 _STUDENT2_WEEKDAYS: frozenset[int] = frozenset({2, 4})  # Wed=2, Fri=4
 
 

@@ -2,7 +2,7 @@
 
 After every account has finished booking, one email goes to the owner listing
 each `notify_result` account's outcome — booked (date, hour, court) or not
-(reason + the hours it tried). Only the weekend `student` account carries the
+(reason + the hours it tried). Only the `student` account carries the
 flag; staff and student2 are left out, and a run with no flagged account
 sends nothing.
 

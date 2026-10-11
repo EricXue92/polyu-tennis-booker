@@ -77,9 +77,11 @@ client.
 
 - **Staff** (`POLYU_USERNAME`/`POLYU_PASSWORD`): weekends only since
   2026-10-08, rule `slot_priority_for`.
-- **Student** (`POLYU_STUDENT_USERNAME`/`POLYU_STUDENT_PASSWORD`): weekends
-  only, rule `student_slot_priority_for`. The owner wants two consecutive
-  weekend hours, one per account, so the evening is split by parity: staff
+- **Student** (`POLYU_STUDENT_USERNAME`/`POLYU_STUDENT_PASSWORD`): every
+  day, rule `student_slot_priority_for`. Weekdays (since 2026-10-11) it tries
+  `_STUDENT_WEEKDAY_SLOTS` — 18:30 only, both courts, deliberately no
+  fallback, so a lost 18:30 is an exit 1. Weekends: the owner wants two
+  consecutive hours, one per account, so the evening is split by parity: staff
   takes the **even** hours (18:30 → 20:30), student the **odd** hours (17:30 →
   19:30 → 21:30), both on both courts. Both fire at 08:30 blind to each
   other, so this static split is the only thing preventing overlap — never
@@ -87,10 +89,12 @@ client.
 - **Student2** (`POLYU_STUDENT2_USERNAME`/`POLYU_STUDENT2_PASSWORD`, student
   site): Wednesday and Friday targets only (`_STUDENT2_WEEKDAYS`), rule
   `student2_slot_priority_for`, trying `SLOT_PRIORITY` (any one hour of
-  18:30–21:30). It is the only account active those days.
+  18:30–21:30). `student` fires alongside it those days on 18:30 only; the
+  two may each take a court at 18:30 or end up on different hours — accepted
+  by the owner, there is no weekday split.
 - **Student result email.** Accounts with `notify_result=True` (only
-  `student`) get their outcome emailed after every run they take part in;
-  weekday runs send nothing. `src/notify.py` uses Gmail SMTP
+  `student`) get their outcome emailed after every run they take part in —
+  now every day. `src/notify.py` uses Gmail SMTP
   (`SMTP_USERNAME`/`SMTP_PASSWORD` = app password; recipient
   `NOTIFY_EMAIL_TO`, default `SMTP_USERNAME` — the repo is public, never
   hardcode the address). It runs strictly after `book_all`, is best-effort
@@ -229,7 +233,8 @@ Check latencies before suspecting the code:
 
 - Slot preferences: per-account rules in `src/config.py` (tuples of
   `(start, end)`, tried in order). `SLOT_PRIORITY` (18:30 → 19:30 → 20:30) is
-  the weekday ladder student2 uses; the third rung is cheap insurance on
+  the weekday ladder student2 uses (`student` takes only its first rung via
+  `_STUDENT_WEEKDAY_SLOTS`); the third rung is cheap insurance on
   contested evenings `[2026-09-16]`.
 - Trigger time: `TRIGGER_TIME_HKT` in `src/config.py`.
 - Days-ahead window: `DAYS_AHEAD` in `src/dates.py`.
@@ -241,10 +246,11 @@ Check latencies before suspecting the code:
 Each account's rule in `src/config.py` decides which target weekdays it books.
 When every account's rule returns `()`, `run()` short-circuits with exit 0
 (no sleep, no Playwright launch) — the watchdog treats the day as accounted
-for and does not open an issue. Currently (since 2026-10-08):
+for and does not open an issue; no day currently hits that path. Currently
+(since 2026-10-11):
 
-- **Mon / Tue / Thu:** nobody books.
-- **Wed / Fri:** student2 only, 18:30 → 19:30 → 20:30.
+- **Mon / Tue / Thu:** student only, 18:30.
+- **Wed / Fri:** student 18:30 only; student2 18:30 → 19:30 → 20:30.
 - **Sat / Sun:** staff takes `_STAFF_WEEKEND_SLOTS` (18:30, 20:30), student
   takes `_STUDENT_WEEKEND_SLOTS` (17:30, 19:30, 21:30) — see "Accounts and
   sites" for why the parity split matters.
