@@ -9,6 +9,30 @@ Entry format: **what happened** (with log evidence) → **cause** → **rule**.
 
 ---
 
+## 2026-10-15 — 8 straight failures (runs 10-08..10-15): slow queue, 20s timeout
+
+Every run logged in, bootstrapped and got every cell_click ACCEPTED in
+~160–400ms. What changed is submit latency at 08:30: 3.8–6s in September,
+11–17s on the last wins (10-02, 10-05, 10-07), 9–18s+ in the failures.
+
+- **Competition** (10-09, 10-10, 10-13, 10-14, 10-15): OCCUPIED after 9–18s.
+- **Pre-reserved** (10-11, target Sun 10-18): first group OCCUPIED in 0.4–0.8s.
+- **Our timeout** (10-08 staff, 10-12 student): both 18:30 submits died on
+  the 20s `ReadTimeout`; 10-13 answered at 18.0s. Aborting rolls back.
+- Fewer rungs since 10-08/10-11 (student weekdays: 18:30 only, by choice)
+  means one lost hour is the whole day.
+- New/unexplained pages: 42689-byte student FATAL is the student twin of the
+  staff 29640 page (each 37 bytes shorter than its site's OCCUPIED page:
+  42726 / 29677) — likely another "taken" variant, unconfirmed. A 403
+  "There is a problem. Please click below link to try again." (6174 bytes)
+  hit student2's 19:30 group on 10-09 and 10-14 at ~9–11s.
+
+**Rules:** `submit_timeout` 20s → 45s (waiting beats aborting; the stagger
+means it delays nothing). `cell_click`/`submit` `unexpected` lines now log
+`message=` — visible text after the last "Make Booking" heading (nav also
+says "Make Booking", hence the last one) — to settle what the 29640/42689
+and 403 pages say.
+
 ## 2026-09-20 — every cell_click timed out; both accounts quit after 6s
 
 Run 35476350778, target Sun 2026-09-27, staff + student.

@@ -154,12 +154,13 @@ Hot path:
   early once a settled group holds a SUCCESS (don't burn the daily quota on a
   fallback) or a FATAL with no SUCCESS (auth presumed dead).
 - **Two timeout budgets** (`PolyUHttpClient(timeout=6.0,
-submit_timeout=20.0)`). `timeout` guards cell_click/warmup: 150–300ms warm,
+submit_timeout=45.0)`). `timeout` guards cell_click/warmup: 150–300ms warm,
   and gathered, so one hang stalls the whole submit phase (retry rounds get
   15s — nothing is queued behind them). `submit_timeout` guards
-  make_book_submit.do, which legitimately takes 4–6s+ at 08:30; connect stays
-  on the short budget. Aborting a submit rolls it back server-side, so
-  waiting always beats giving up `[2026-08-19]`.
+  make_book_submit.do, which legitimately takes 4–6s+ at 08:30 (9–18s+
+  since 2026-10); connect stays on the short budget. Aborting a submit rolls
+  it back server-side, so waiting always beats giving up `[2026-08-19]`
+  `[2026-10-15]`.
 - **Double-booking is prevented by PolyU's quota, not by us** (one booking
   per day; a surplus commit gets the quota page `[2026-08-29]`). The
   multi-SUCCESS WARNING stays as belt-and-braces. Deliberately no auto-cancel
@@ -198,7 +199,8 @@ Check latencies before suspecting the code:
 
 - **Every candidate OCCUPIED within ~0.5s of 08:30** → the courts were
   reserved ahead of the public release; nothing to fix. A slot lost to
-  competition answers after normal submit latency (~3.8–6s). Cell-click
+  competition answers after normal submit latency (~3.8–6s in 2026-09,
+  ~9–18s since 2026-10 `[2026-10-15]`). Cell-click
   ACCEPTED is only session state, not availability `[2026-09-19]`.
 - **`submit unexpected … ERROR_FATAL` next to a SUCCESS** → PolyU's quota page
   rejecting the surplus commits; expected on every healthy day, because 18:30
@@ -207,9 +209,12 @@ Check latencies before suspecting the code:
   _before_ the SUCCESS `[2026-09-17]`.
 - **`cell_click transport error: ReadTimeout` + `retrying them (attempt N)`**
   → PolyU was slow; the retry path is working as designed `[2026-09-20]`.
-- **Open:** a 29640-byte ERROR_FATAL page that is _not_ the quota page
-  (29715 bytes) and whose message the diagnostics don't capture yet — see
-  `[2026-09-17]` before building on any assumption about it.
+- **Open:** a 29640-byte (staff) / 42689-byte (student) ERROR_FATAL page —
+  _not_ the quota page, 37 bytes shorter than that site's OCCUPIED page — and
+  a 403 "There is a problem" page (6174 bytes, student site). Since
+  2026-10-15 every `unexpected` line logs `message=` (text after the last
+  "Make Booking"); read it before assuming what they mean `[2026-09-17]`
+  `[2026-10-15]`. "auth presumed dead" on these is not a login failure.
 
 ## Maintenance hooks (when PolyU changes)
 

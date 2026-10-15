@@ -131,6 +131,25 @@ def _diag_context(body: str | None, width: int = 120, max_windows: int = 4) -> l
     return [text[s:e] for s, e in windows[:max_windows]]
 
 
+_PREVIEW_CHARS = 300
+
+
+def _page_message(body: str | None, max_len: int = 400) -> str:
+    """Visible text after the page's last "Make Booking" heading, bounded.
+
+    The 29640/42689-byte FATAL submit pages carry their message past the
+    preview (pure navigation) and outside every `_DIAG_MARKERS` window
+    (2026-09-17, 2026-10-15). The nav menu also says "Make Booking", so take
+    the *last* occurrence; without one, continue where the preview stops.
+    """
+    text = _visible_text(body)
+    if not text:
+        return ""
+    i = text.lower().rfind("make booking")
+    start = i + len("make booking") if i >= 0 else _PREVIEW_CHARS
+    return text[start:].strip()[:max_len]
+
+
 def _classify_http_error(status: int) -> "BookingResult":
     if 500 <= status < 600:
         return BookingResult.ERROR_TRANSIENT
@@ -228,7 +247,7 @@ class PolyUHttpClient:
         csrf_token: str,
         fb_user_id: str,
         timeout: float = 6.0,
-        submit_timeout: float = 20.0,
+        submit_timeout: float = 45.0,
         site: "Site | None" = None,
     ) -> None:
         # Two budgets, because the two hot-path POSTs behave nothing alike.
@@ -237,8 +256,9 @@ class PolyUHttpClient:
         # the warm pool, and every candidate's cell_click is gathered together,
         # so one hung cell_click stalls the entire submit phase behind it.
         #
-        # `submit_timeout` (20s) guards make_book_submit.do, which does the
-        # real transactional work and legitimately takes 4-6s+ at 08:30. The
+        # `submit_timeout` (45s) guards make_book_submit.do, which does the
+        # real transactional work and legitimately takes 4-6s+ at 08:30 —
+        # 9-18s+ since 2026-10, when 20s cost two days to ReadTimeout. The
         # old shared 6s budget sat in the middle of that distribution and cost
         # us 7 consecutive runs (2026-08-19..2026-08-27): every 18:30 submit
         # died on ReadTimeout without ever returning SUCCESS or OCCUPIED, while
@@ -478,11 +498,12 @@ class PolyUHttpClient:
             )
             _LOG.warning(
                 "cell_click unexpected (status=%d, location=%r, body_len=%d, "
-                "preview=%r, markers=%s, context=%s) -> %s",
+                "preview=%r, markers=%s, context=%s, message=%r) -> %s",
                 resp.status_code, location, len(body),
-                _visible_text(body)[:300],
+                _visible_text(body)[:_PREVIEW_CHARS],
                 _diag_markers(body),
                 _diag_context(body),
+                _page_message(body),
                 outcome.name,
             )
         return CellClickResult(slot=slot, outcome=outcome, latency_ms=latency_ms)
@@ -584,11 +605,12 @@ class PolyUHttpClient:
         err = _classify_http_error(resp.status_code)
         _LOG.warning(
             "submit unexpected (status=%d, location=%r, body_len=%d, "
-            "preview=%r, markers=%s, context=%s) -> %s",
+            "preview=%r, markers=%s, context=%s, message=%r) -> %s",
             resp.status_code, location, len(body),
-            _visible_text(body)[:300],
+            _visible_text(body)[:_PREVIEW_CHARS],
             _diag_markers(body),
             _diag_context(body),
+            _page_message(body),
             err.name,
         )
         return err

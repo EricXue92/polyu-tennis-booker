@@ -994,6 +994,63 @@ def test_diag_context_merges_overlapping_windows_and_caps_count():
     assert _diag_context("", width=40) == []
 
 
+# 2026-10-15: the 29640/42689-byte FATAL pages put their message past the
+# 300-char preview (all navigation) and outside every marker window. The
+# message sits after the page's last "Make Booking" heading, so log from there.
+_NAV_HEAVY_PAGE = (
+    "<html><body><div id='nav'>" + "<a>Facility Booking</a> " * 40
+    + "<a>Make Booking</a> <a>Transfer Booking</a> <a>Logout</a></div>"
+    + "<h1>Make Booking</h1><p>The selected time slot is being processed.</p>"
+    + "</body></html>"
+)
+
+
+def test_page_message_starts_after_last_make_booking_heading():
+    from src.http_client import _page_message
+    msg = _page_message(_NAV_HEAVY_PAGE)
+    assert msg.startswith("The selected time slot is being processed.")
+    assert "Transfer Booking" not in msg
+
+
+def test_page_message_falls_back_to_text_past_preview_and_is_bounded():
+    from src.http_client import _page_message
+    body = "<p>" + "x" * 300 + " tail message " + "y" * 2000 + "</p>"
+    msg = _page_message(body, max_len=50)
+    assert msg.startswith(" tail message") or msg.startswith("tail message")
+    assert len(msg) <= 50
+    assert _page_message("") == ""
+    assert _page_message(None) == ""
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_submit_unexpected_logs_message_after_make_booking(caplog):
+    from src.http_client import PolyUHttpClient, BookingResult
+    import logging
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do"
+    ).mock(return_value=Response(200, text=_NAV_HEAVY_PAGE))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        with caplog.at_level(logging.WARNING, logger="booker"):
+            result = await client.submit(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert result is BookingResult.ERROR_FATAL
+    msg = [r for r in caplog.records if "submit unexpected" in r.message][0].message
+    assert "message='The selected time slot is being processed.'" in msg
+
+
+def test_submit_timeout_default_absorbs_slow_0830_queue():
+    # 2026-10-08 and 2026-10-12 lost every 18:30 submit to a 20s ReadTimeout;
+    # 2026-10-13 answered at 18.0s. Aborting rolls the booking back.
+    from src.http_client import PolyUHttpClient
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    assert client._submit_timeout.read == 45.0
+    assert client._submit_timeout.connect == 6.0
+
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_submit_unexpected_logs_page_message_not_html_head(caplog):
