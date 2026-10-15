@@ -44,10 +44,11 @@ testing are in its `README.md`.
 (`active_jobs`), does a Playwright login for each at 08:29 (concurrently, one
 browser context per account), extracts session state (cookies + CSRFToken +
 fbUserId) via `bootstrap_http_client`, closes the browser, warms each
-account's connection pool (`warm_all`), sleeps to 08:30:00.000, and hands off
-to `src/http_booker.py:book_via_http` once per account via `book_all`
+account's connection pool (`warm_all`), and at 08:29:59.5 hands off to
+`src/http_booker.py:book_via_http` once per account via `book_all`
 (`asyncio.gather`; one `AccountResult` per account, exit 0 via `overall_rc`
-only if every account booked).
+only if every account booked) together with a `wait_for_trigger` coroutine
+that sleeps to 08:30:00.000 — the flow pre-clicks, awaits it, then submits.
 
 That orchestrator **skips search** and runs two phases over the
 `(SLOT_PRIORITY × TENNIS_FACILITIES)` candidate set. Phase 1 fires every
@@ -109,10 +110,12 @@ client.
 
 Timing:
 
-- **Slots open at EXACTLY 08:30 HKT.** Never let the booker run earlier: no
-  `skip_sleep=true` by default, don't remove the
-  `asyncio.sleep(seconds_until_hkt_time(...))` calls in `booker.run`, don't
-  lower `TRIGGER_TIME_HKT`. Early sees no slots; late loses popular ones.
+- **Slots open at EXACTLY 08:30 HKT.** Never let a _submit_ go out earlier:
+  no `skip_sleep=true` by default, don't remove the
+  `asyncio.sleep(seconds_until_hkt_time(...))` calls in `booker.run` or the
+  `wait_for_trigger` await in `book_via_http_outcome`, don't lower
+  `TRIGGER_TIME_HKT`. Early sees no slots; late loses popular ones. The
+  cell-click round is the one deliberate exception (next bullet).
 - **A Cloudflare Worker triggers the workflow** (`infra/cloudflare-worker/`)
   at 07:30 HKT via `workflow_dispatch`; GH's scheduled cron proved
   unreliable, so book.yml has **no `schedule:` block** `[2026-05-10]`. The
@@ -121,12 +124,19 @@ Timing:
 - **`skip_sleep` default MUST stay `false` in book.yml.** The Worker
   dispatches with no inputs, so defaults apply — `true` would book before
   slot-open and silently fail. The Worker also hardcodes `ref: "main"`.
-- **Three-phase sleep — don't collapse it or skip the warmup.** 08:29:00
+- **Four-phase sleep — don't collapse it or skip the warmup.** 08:29:00
   login + bootstrap, close browser → 08:29:58 `client.warmup(n=candidates)`
-  (one warm connection only helps the first concurrent POST) → 08:30:00.000
-  fire. A cold first POST at 08:30 once took 5.5s `[2026-06-05]`.
+  (one warm connection only helps the first concurrent POST) → 08:29:59.5
+  cell-click every candidate (`PRECLICK_LEAD_SECONDS`) → 08:30:00.000 submit.
+  A cold first POST at 08:30 once took 5.5s `[2026-06-05]`. The pre-click
+  exists because a cell-click is one ~0.3s round trip from the US runner and
+  only writes session state, not availability `[2026-09-19]`; from 2026-10
+  submits queue 9–18s at PolyU, so arrival order is everything
+  `[2026-10-15]`. If the pre-open click yields no ACCEPTED, the flow re-clicks
+  at 08:30 (the old behaviour); a `pre-click: nothing ACCEPTED` WARNING means
+  PolyU refused it — read the cell results before touching the lead time.
 - **Warmup never delays the trigger.** `booker.warm_all` waits only until
-  08:30:00; stragglers keep running (not cancelled — they still add warm
+  the pre-click; stragglers keep running (not cancelled — they still add warm
   sockets) and the fire goes out on time, `max_connections=16` leaving room
   for cold connections. Don't start the warmup earlier instead: PolyU drops
   idle keepalives after ~5s, so `WARMUP_LEAD_SECONDS` must stay small

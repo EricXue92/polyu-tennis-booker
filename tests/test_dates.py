@@ -53,3 +53,10 @@ def test_sleep_until_skips_when_already_past():
     with patch("src.dates.time.sleep") as mock_sleep:
         sleep_until_hkt(time(8, 0))
     mock_sleep.assert_not_called()
+
+
+@freeze_time("2026-05-09 00:29:59", tz_offset=0)  # 08:29:59.000 HKT
+def test_seconds_until_honours_sub_second_targets():
+    # The pre-click fires at 08:29:59.5; a target with microseconds must not
+    # be rounded down to the whole second.
+    assert seconds_until_hkt_time(time(8, 29, 59, 500_000)) == pytest.approx(0.5, abs=0.01)

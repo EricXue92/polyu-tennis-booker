@@ -51,7 +51,7 @@ import logging
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import date, datetime, time
-from typing import Protocol
+from typing import Awaitable, Callable, Protocol
 
 from src.http_client import (
     AvailableSlot,
@@ -79,6 +79,11 @@ SUBMIT_STAGGER_SECONDS = 2.5
 CELL_RETRY_WINDOW_SECONDS = 45.0
 CELL_RETRY_TIMEOUT_SECONDS = 15.0
 CELL_RETRY_MIN_ROUND_SECONDS = 1.0
+
+
+# Awaited once between the cell-click round and the first submit; the
+# production implementation sleeps until TRIGGER_TIME_HKT.
+TriggerWait = Callable[[], Awaitable[None]]
 
 
 class _ClientLike(Protocol):
@@ -128,12 +133,14 @@ async def book_via_http(
     stagger_s: float = SUBMIT_STAGGER_SECONDS,
     cell_retry_window_s: float = CELL_RETRY_WINDOW_SECONDS,
     cell_retry_min_round_s: float = CELL_RETRY_MIN_ROUND_SECONDS,
+    wait_for_trigger: TriggerWait | None = None,
 ) -> int:
     """Run the booking flow. Returns 0 on SUCCESS, 1 otherwise."""
     outcome = await book_via_http_outcome(
         client, target_date, slots, dry_run, log=log, stagger_s=stagger_s,
         cell_retry_window_s=cell_retry_window_s,
         cell_retry_min_round_s=cell_retry_min_round_s,
+        wait_for_trigger=wait_for_trigger,
     )
     return outcome.rc
 
@@ -148,10 +155,21 @@ async def book_via_http_outcome(
     stagger_s: float = SUBMIT_STAGGER_SECONDS,
     cell_retry_window_s: float = CELL_RETRY_WINDOW_SECONDS,
     cell_retry_min_round_s: float = CELL_RETRY_MIN_ROUND_SECONDS,
+    wait_for_trigger: TriggerWait | None = None,
 ) -> BookingOutcome:
     """Run the parallel cell-click + staggered time-grouped submit flow.
 
     Same flow as `book_via_http`, but also reports which slot won.
+
+    `wait_for_trigger`, when given, is awaited between the cell-click round
+    and the first submit (production: sleep until 08:30:00.000). The caller
+    then starts this coroutine *before* slot-open so the cell-click round -
+    one full round trip, ~0.3s from a GitHub runner - is already paid when
+    the trigger fires and the submits leave at 08:30:00.000 sharp. A
+    cell-click only records the chosen cell in the server session; it does
+    not check availability [2026-09-19], which is what makes clicking early
+    plausible. If PolyU refuses the pre-open click (no candidate ACCEPTED),
+    the round is repeated after the trigger, i.e. the pre-2026-10-16 flow.
     """
     candidates = _build_candidates(target_date, slots)
     log.info("predictive booking: %d candidates queued", len(candidates))
@@ -160,19 +178,43 @@ async def book_via_http_outcome(
         log.info("DRY RUN: stopping before cell_click phase")
         return BookingOutcome(0)
 
-    # Phase 1: parallel cell-clicks.
-    # return_exceptions=False - cell_click catches httpx.HTTPError internally
-    # and returns ERROR_TRANSIENT. Any uncaught exception is a real bug and
-    # should crash the run with a traceback in CI, not be silently swallowed.
-    cell_results: list[CellClickResult] = list(await asyncio.gather(
-        *(client.cell_click(slot) for slot in candidates)
-    ))
+    async def _click_round() -> list[CellClickResult]:
+        # Parallel cell-clicks.
+        # return_exceptions=False - cell_click catches httpx.HTTPError
+        # internally and returns ERROR_TRANSIENT. Any uncaught exception is a
+        # real bug and should crash the run with a traceback in CI, not be
+        # silently swallowed.
+        results: list[CellClickResult] = list(await asyncio.gather(
+            *(client.cell_click(slot) for slot in candidates)
+        ))
+        for rank, cr in enumerate(results):
+            log.info(
+                "rank=%d %s: cell=%s (latency=%dms)",
+                rank, cr.slot.facility_name, cr.outcome.name, cr.latency_ms,
+            )
+        return results
 
-    for rank, cr in enumerate(cell_results):
-        log.info(
-            "rank=%d %s: cell=%s (latency=%dms)",
-            rank, cr.slot.facility_name, cr.outcome.name, cr.latency_ms,
-        )
+    # Phase 1: cell-click round (pre-click when a trigger is supplied).
+    cell_results = await _click_round()
+
+    if wait_for_trigger is not None:
+        n_accepted = sum(cr.outcome is CellOutcome.ACCEPTED for cr in cell_results)
+        await wait_for_trigger()
+        if n_accepted:
+            log.info(
+                "pre-click: %d/%d ACCEPTED before trigger; submitting now",
+                n_accepted, len(cell_results),
+            )
+        else:
+            # Pre-open click refused (or timed out): fall back to the normal
+            # at-trigger round. Retries below then work from this round, not
+            # from the pre-open one.
+            log.warning(
+                "pre-click: nothing ACCEPTED before trigger (results: %s); "
+                "re-clicking now",
+                [cr.outcome.name for cr in cell_results],
+            )
+            cell_results = await _click_round()
 
     # Phase 1b: nothing ACCEPTED but some candidates merely timed out / 5xx'd -
     # re-fire those until one lands, none is transient any more, or the window

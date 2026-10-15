@@ -27,6 +27,7 @@ from src.log import build_logger
 from src.notify import AccountResult, send_report
 
 if TYPE_CHECKING:  # pragma: no cover
+    from src.http_booker import TriggerWait
     from src.http_client import PolyUHttpClient
 
 
@@ -40,6 +41,14 @@ PRELOGIN_LEAD_SECONDS = 60
 # (5.5s observed on 2026-06-05). 2s gives the warmup GET time to complete
 # (~400-800ms on a cold connection) with margin before 08:30:00.000.
 WARMUP_LEAD_SECONDS = 2
+# How early to fire the cell-click round so that only the submits are left to
+# send at 08:30:00.000. A cell-click is one round trip (~0.3s from a GitHub
+# runner) and only records the chosen cell in the server session, it does not
+# check availability [2026-09-19]; see http_booker.book_via_http_outcome for
+# the fallback when PolyU refuses the pre-open click. Keep this well under
+# WARMUP_LEAD_SECONDS so the warmup has landed, and small so the pre-clicks
+# cannot complete so early that PolyU's ~5s idle keepalive drop hits them.
+PRECLICK_LEAD_SECONDS = 0.5
 
 
 class LoginFailed(RuntimeError):
@@ -213,12 +222,14 @@ async def book_all(
     dry_run: bool,
     *,
     log: logging.Logger,
+    wait_for_trigger: TriggerWait | None = None,
 ) -> list[AccountResult]:
     """Fire every account's booking flow concurrently.
 
     Accounts are independent: one failing (or raising) never aborts the
     others. Returns one AccountResult per job, in job order; `overall_rc`
-    collapses them into the run's exit code.
+    collapses them into the run's exit code. `wait_for_trigger` is handed to
+    every account's flow: each pre-clicks, awaits it, then submits.
     """
     from src.http_booker import book_via_http_outcome
 
@@ -226,6 +237,7 @@ async def book_all(
         try:
             outcome = await book_via_http_outcome(
                 job.client, target_date, job.slots, dry_run, log=job.log,
+                wait_for_trigger=wait_for_trigger,
             )
         except Exception:  # noqa: BLE001 - isolate accounts from each other
             job.log.exception("account %s crashed", job.account.name)
@@ -355,25 +367,41 @@ async def run(
             raise RuntimeError("every account failed to log in")
 
         # Phase 2: warm up every account's connection pool ~2s before trigger,
-        # then sleep the last sliver and fire all accounts together.
+        # pre-click every candidate ~0.5s before it, then sleep the last
+        # sliver inside the booking flow and submit at 08:30:00.000 sharp.
+        wait_for_trigger: TriggerWait | None = None
         if not skip_sleep:
             warmup_target = (
                 datetime.combine(date.today(), TRIGGER_TIME_HKT)
                 - timedelta(seconds=WARMUP_LEAD_SECONDS)
+            ).time()
+            preclick_target = (
+                datetime.combine(date.today(), TRIGGER_TIME_HKT)
+                - timedelta(seconds=PRECLICK_LEAD_SECONDS)
             ).time()
             delay = seconds_until_hkt_time(warmup_target)
             log.info("sleeping %.3fs until HKT %s (pre-warmup)", delay, warmup_target)
             await asyncio.sleep(delay)
 
             warm_stragglers = await warm_all(
-                prepared, budget_s=seconds_until_hkt_time(TRIGGER_TIME_HKT), log=log,
+                prepared, budget_s=seconds_until_hkt_time(preclick_target), log=log,
             )
 
-            delay = seconds_until_hkt_time(TRIGGER_TIME_HKT)
-            log.info("sleeping %.3fs until HKT %s (trigger)", delay, TRIGGER_TIME_HKT)
+            delay = seconds_until_hkt_time(preclick_target)
+            log.info("sleeping %.3fs until HKT %s (pre-click)", delay, preclick_target)
             await asyncio.sleep(delay)
-            log.info("woke up at trigger time, firing predictive booking for %d account(s)", len(prepared))
-        results = login_failures + await book_all(prepared, target_date, dry_run, log=log)
+            log.info("woke up for pre-click, starting booking flow for %d account(s)", len(prepared))
+
+            async def _wait_for_trigger() -> None:
+                delay = seconds_until_hkt_time(TRIGGER_TIME_HKT)
+                log.info("sleeping %.3fs until HKT %s (trigger)", delay, TRIGGER_TIME_HKT)
+                await asyncio.sleep(delay)
+                log.info("woke up at trigger time, submitting")
+
+            wait_for_trigger = _wait_for_trigger
+        results = login_failures + await book_all(
+            prepared, target_date, dry_run, log=log, wait_for_trigger=wait_for_trigger,
+        )
         # Best-effort and strictly after the hot path; never affects the exit code.
         await send_report(target_date, results, dry_run=dry_run)
         return overall_rc(results)

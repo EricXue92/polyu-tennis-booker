@@ -34,7 +34,7 @@ def seconds_until_hkt_time(target: dtime) -> float:
     now = now_hkt()
     today_target = now.replace(
         hour=target.hour, minute=target.minute, second=target.second,
-        microsecond=0,
+        microsecond=target.microsecond,
     )
     delta = (today_target - now).total_seconds()
     return max(delta, 0.0)
