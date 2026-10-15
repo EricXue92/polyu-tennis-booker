@@ -13,6 +13,9 @@ book_via_http:
      until one is ACCEPTED, none is transient, or the retry window closes;
      still 0 ACCEPTED -> return 1 (no submit calls).
   6. If all groups exhausted with no SUCCESS, return 1.
+  7. With `wait_for_trigger`: step 2 runs first (pre-click), the trigger is
+     awaited, then submits; a pre-click round with no ACCEPTED is repeated
+     after the trigger (see the "Pre-click before the trigger" tests).
 """
 import asyncio
 import logging
@@ -582,3 +585,135 @@ async def test_outcome_has_no_slot_on_failure_or_dry_run():
         date(2026, 6, 10), _PRIORITY, dry_run=True, log=_LOG,
     )
     assert (dry.rc, dry.slot) == (0, None)
+
+
+# --- Pre-click before the trigger ------------------------------------------
+#
+# With `wait_for_trigger` given, the orchestrator fires the cell-click round
+# *before* awaiting the trigger (08:29:59.5 in production) so the submits can
+# leave at 08:30:00.000 without first paying a cell-click round trip. If the
+# early round yields no ACCEPTED (PolyU refused the pre-open click), the
+# round is simply repeated after the trigger - the old behaviour.
+
+
+class _Trigger:
+    """Awaitable trigger that records when it fired relative to client calls."""
+    def __init__(self, client: _FakeClient):
+        self._client = client
+        self.fired = False
+        self.cell_clicks_before: int | None = None
+        self.submits_before: int | None = None
+
+    async def __call__(self) -> None:
+        self.fired = True
+        self.cell_clicks_before = len(self._client.cell_click_calls)
+        self.submits_before = len(self._client.submit_calls)
+
+
+@pytest.mark.asyncio
+async def test_preclick_accepted_submits_right_after_trigger_without_reclicking():
+    from src.http_booker import book_via_http
+
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results={**_all_submit(BookingResult.OCCUPIED),
+                        (18, _FACILITY_IDS[0]): BookingResult.SUCCESS},
+    )
+    trigger = _Trigger(client)
+    rc = await book_via_http(
+        client, date(2026, 6, 10), _PRIORITY, dry_run=False, log=_LOG,
+        wait_for_trigger=trigger,
+    )
+    assert rc == 0
+    assert trigger.fired
+    # Every cell-click happened before the trigger, no submit did.
+    assert trigger.cell_clicks_before == 4
+    assert trigger.submits_before == 0
+    # No second click round once the pre-click landed.
+    assert len(client.cell_click_calls) == 4
+    assert {s.start_dt.hour for s in client.submit_calls} == {18}
+
+
+@pytest.mark.asyncio
+async def test_preclick_rejected_reclicks_after_trigger_then_submits():
+    from src.http_booker import book_via_http
+
+    # First round (pre-open): PolyU bounces every click (OCCUPIED). Second
+    # round (after the trigger): ACCEPTED.
+    client = _FakeClient(
+        cell_click_outcomes={
+            key: [CellOutcome.OCCUPIED, CellOutcome.ACCEPTED]
+            for key in _all_cell(CellOutcome.ACCEPTED)
+        },
+        submit_results={**_all_submit(BookingResult.OCCUPIED),
+                        (18, _FACILITY_IDS[0]): BookingResult.SUCCESS},
+    )
+    trigger = _Trigger(client)
+    rc = await book_via_http(
+        client, date(2026, 6, 10), _PRIORITY, dry_run=False, log=_LOG,
+        wait_for_trigger=trigger,
+    )
+    assert rc == 0
+    assert trigger.cell_clicks_before == 4 and trigger.submits_before == 0
+    assert len(client.cell_click_calls) == 8
+    assert {s.start_dt.hour for s in client.submit_calls} == {18}
+
+
+@pytest.mark.asyncio
+async def test_preclick_partial_accept_keeps_only_the_accepted_candidates():
+    from src.http_booker import book_via_http
+
+    # 18:30 court 1 ACCEPTED early, the rest OCCUPIED: submit only that one,
+    # don't spend a round trip re-clicking the others.
+    client = _FakeClient(
+        cell_click_outcomes={**_all_cell(CellOutcome.OCCUPIED),
+                             (18, _FACILITY_IDS[0]): CellOutcome.ACCEPTED},
+        submit_results={(18, _FACILITY_IDS[0]): BookingResult.SUCCESS},
+    )
+    trigger = _Trigger(client)
+    rc = await book_via_http(
+        client, date(2026, 6, 10), _PRIORITY, dry_run=False, log=_LOG,
+        wait_for_trigger=trigger,
+    )
+    assert rc == 0
+    assert len(client.cell_click_calls) == 4
+    assert [s.facility_id for s in client.submit_calls] == [_FACILITY_IDS[0]]
+
+
+@pytest.mark.asyncio
+async def test_preclick_all_transient_waits_for_trigger_before_retrying():
+    from src.http_booker import book_via_http
+
+    # Timeouts in the pre-click round must not start the retry loop before
+    # the trigger: the trigger comes first, then the normal round + retries.
+    client = _FakeClient(
+        cell_click_outcomes={
+            key: [CellOutcome.ERROR_TRANSIENT, CellOutcome.ACCEPTED]
+            for key in _all_cell(CellOutcome.ACCEPTED)
+        },
+        submit_results={**_all_submit(BookingResult.OCCUPIED),
+                        (18, _FACILITY_IDS[0]): BookingResult.SUCCESS},
+    )
+    trigger = _Trigger(client)
+    rc = await book_via_http(
+        client, date(2026, 6, 10), _PRIORITY, dry_run=False, log=_LOG,
+        wait_for_trigger=trigger,
+    )
+    assert rc == 0
+    assert trigger.cell_clicks_before == 4
+    assert len(client.cell_click_calls) == 8
+
+
+@pytest.mark.asyncio
+async def test_dry_run_never_awaits_the_trigger():
+    from src.http_booker import book_via_http
+
+    client = _FakeClient(cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED))
+    trigger = _Trigger(client)
+    rc = await book_via_http(
+        client, date(2026, 6, 10), _PRIORITY, dry_run=True, log=_LOG,
+        wait_for_trigger=trigger,
+    )
+    assert rc == 0
+    assert not trigger.fired
+    assert client.cell_click_calls == []

@@ -246,3 +246,35 @@ async def test_warm_all_returns_as_soon_as_every_account_is_warm():
     )
     assert not stragglers
     assert _time.perf_counter() - t0 < 0.5
+
+
+@pytest.mark.asyncio
+async def test_book_all_passes_the_trigger_to_every_account():
+    from src.booker import book_all, overall_rc
+    from tests.test_http_booker import _Trigger
+
+    target = date(2026, 9, 18)
+    slots = [(time(18, 30), time(19, 30))]
+    staff = _FakeClient(
+        {(18, 10): CellOutcome.ACCEPTED, (18, 11): CellOutcome.ACCEPTED},
+        {(18, 10): BookingResult.SUCCESS, (18, 11): BookingResult.OCCUPIED},
+    )
+    student = _FakeClient(
+        {(18, 10): CellOutcome.ACCEPTED, (18, 11): CellOutcome.ACCEPTED},
+        {(18, 10): BookingResult.OCCUPIED, (18, 11): BookingResult.SUCCESS},
+    )
+    fired = 0
+
+    async def trigger() -> None:
+        nonlocal fired
+        fired += 1
+        # Both accounts have pre-clicked, nobody has submitted yet.
+        assert len(staff.cell_click_calls) == 2 and len(student.cell_click_calls) == 2
+        assert staff.submit_calls == [] and student.submit_calls == []
+
+    results = await book_all(
+        [_job(STAFF_ACCOUNT, staff, slots), _job(STUDENT_ACCOUNT, student, slots)],
+        target, dry_run=False, log=logging.getLogger("t"), wait_for_trigger=trigger,
+    )
+    assert overall_rc(results) == 0
+    assert fired == 2

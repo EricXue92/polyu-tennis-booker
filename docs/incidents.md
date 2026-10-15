@@ -9,6 +9,37 @@ Entry format: **what happened** (with log evidence) → **cause** → **rule**.
 
 ---
 
+## 2026-10-15 — pre-click at 08:29:59.5 (experiment; first live run 10-16)
+
+Follow-up to the entry below. With login, bootstrap and warmup all healthy,
+the only lever left on a contested day is _when our submit reaches PolyU_.
+From a GitHub runner (US) a warm cell_click answers in ~280ms and the submit
+only leaves after the slowest cell_click of the round has returned, so the
+18:30 commits arrived at roughly 08:30:00.5. From Hong Kong the same GET
+takes 35–80ms (TLS handshake 16ms, measured 2026-10-15 from the owner's Mac).
+
+**Change:** `book_via_http_outcome` now takes `wait_for_trigger`; `run()`
+starts every account's flow at 08:29:59.5 (`PRECLICK_LEAD_SECONDS`), the
+cell-click round goes out immediately, the flow awaits the trigger and the
+submits leave at 08:30:00.000 with no round trip in front of them.
+
+- **Assumption under test:** PolyU accepts a cell_click for a not-yet-open
+  date. Cell-click ACCEPTED is only session state, not availability
+  (2026-09-19 below), so this is plausible but unproven.
+- **Fallback:** a pre-open round with no ACCEPTED (OCCUPIED/FATAL/timeout) is
+  logged as `pre-click: nothing ACCEPTED before trigger` and the round is
+  repeated after the trigger — exactly the previous flow, nothing lost.
+- **Residual risk:** the click is ACCEPTED but the submit is then rejected
+  _because_ the hold predates slot-open. There is no second attempt for that
+  case; the `message=` diagnostic (below) will say what the page said. Given
+  8 straight losses the expected cost of the experiment is ~0.
+- **Also unexplained still:** the 42689-byte student page and the 403
+  "There is a problem" page — the first run with `message=` logging is also
+  10-16.
+
+**Rule:** four-phase sleep (CLAUDE.md "Timing"). `warm_all`'s budget now ends
+at the pre-click, not at the trigger.
+
 ## 2026-10-15 — 8 straight failures (runs 10-08..10-15): slow queue, 20s timeout
 
 Every run logged in, bootstrapped and got every cell_click ACCEPTED in
