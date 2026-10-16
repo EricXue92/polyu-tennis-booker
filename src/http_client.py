@@ -330,6 +330,34 @@ class PolyUHttpClient:
                 return -1
         return await asyncio.gather(*(_one() for _ in range(n)))
 
+    async def page_text(self, url: str, *, timeout: float | None = None) -> str | None:
+        """GET `url` and return its visible text; None on transport error or
+        non-200. Off the hot path (booking verification, diagnostics)."""
+        try:
+            resp = await self._http.get(
+                url,
+                timeout=timeout if timeout is not None else self._submit_timeout,
+                headers={
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Referer": self.site.make_book_url,
+                },
+            )
+        except httpx.HTTPError as exc:
+            _LOG.warning("page_text %s transport error: %r", url, exc)
+            return None
+        if resp.status_code != 200:
+            _LOG.warning(
+                "page_text %s unexpected (status=%d, location=%r, body_len=%d)",
+                url, resp.status_code, resp.headers.get("location", ""), len(resp.text or ""),
+            )
+            return None
+        return _visible_text(resp.text)
+
+    async def booking_records(self) -> str | None:
+        """Visible text of the "Cancel Booking" page, which lists the
+        account's upcoming bookings; None if it could not be fetched."""
+        return await self.page_text(self.site.cancel_book_url)
+
     async def search(
         self,
         target_date: "date",
