@@ -86,12 +86,18 @@ CELL_RETRY_MIN_ROUND_SECONDS = 1.0
 TriggerWait = Callable[[], Awaitable[None]]
 
 
+# Note carried into the result email when the booking was found in PolyU's
+# records rather than confirmed by the submit response itself.
+RECORDS_NOTE = "提交响应异常，已按 PolyU 预订记录确认"
+
+
 class _ClientLike(Protocol):
     """Minimal subset of PolyUHttpClient used by the orchestrator."""
     async def cell_click(
         self, slot: AvailableSlot, *, timeout: float | None = None,
     ) -> CellClickResult: ...
     async def submit(self, slot: AvailableSlot) -> BookingResult: ...
+    async def booking_records(self) -> list[AvailableSlot] | None: ...
 
 
 def _build_candidates(
@@ -118,9 +124,44 @@ def _build_candidates(
 
 @dataclass(frozen=True)
 class BookingOutcome:
-    """Exit code plus the winning slot (None on failure and on a dry run)."""
+    """Exit code plus the winning slot (None on failure and on a dry run).
+    `note` is set when the slot came from PolyU's booking records rather
+    than from a SUCCESS response (see `_recorded_booking`)."""
     rc: int
     slot: AvailableSlot | None = None
+    note: str = ""
+
+
+async def _recorded_booking(
+    client: _ClientLike,
+    target_date: date,
+    log: logging.Logger,
+) -> AvailableSlot | None | bool:
+    """What PolyU's own records say about target_date, fetched after the
+    submit phase (off the hot path).
+
+    Returns the recorded tennis slot on target_date, None when the records
+    were read and hold nothing for that date, or False when the page could
+    not be fetched (unknown - keep the submit verdict).
+
+    Why this exists: since PolyU started queueing submits (2026-10) the
+    response no longer tells the truth. A booking that went through has
+    answered with a ReadTimeout (10-12) and with the 42689-byte "Failed to
+    reserve facility" page classified ERROR_FATAL (10-14, 10-15, 10-16),
+    so the owner was emailed "not booked" for courts that were booked.
+    """
+    records = await client.booking_records()
+    if records is None:
+        log.warning("booking records unavailable; keeping the submit verdict")
+        return False
+    log.info(
+        "booking records: %s",
+        [f"{s.start_dt:%Y-%m-%d %H:%M} {s.facility_name}" for s in records] or "none",
+    )
+    for slot in records:
+        if slot.start_dt.date() == target_date:
+            return slot
+    return None
 
 
 async def book_via_http(
@@ -176,6 +217,7 @@ async def book_via_http_outcome(
 
     if dry_run:
         log.info("DRY RUN: stopping before cell_click phase")
+        await _recorded_booking(client, target_date, log)
         return BookingOutcome(0)
 
     async def _click_round() -> list[CellClickResult]:
@@ -261,10 +303,10 @@ async def book_via_http_outcome(
     ]
     if not accepted:
         log.warning(
-            "no cell_click ACCEPTED after %d attempt(s); exiting 1 (results: %s)",
+            "no cell_click ACCEPTED after %d attempt(s); (results: %s)",
             attempt, [cr.outcome.name for cr in cell_results],
         )
-        return BookingOutcome(1)
+        return await _settle([], client, target_date, log)
 
     # Phase 2: group ACCEPTED by (start, end) preserving rank order.
     groups: "OrderedDict[tuple[datetime, datetime], list[tuple[int, AvailableSlot]]]" = OrderedDict()
@@ -302,16 +344,29 @@ async def book_via_http_outcome(
             if any(r is BookingResult.SUCCESS for _, r in settled):
                 break  # Already booked — don't burn the daily quota on a fallback.
             if any(r is BookingResult.ERROR_FATAL for _, r in settled):
+                # Either auth is dead or (since 2026-10) the booking went
+                # through behind a "Failed to reserve facility" page; in
+                # both cases a further group is wasted at best.
                 log.error(
                     "submit ERROR_FATAL with no SUCCESS before timeslot %s; "
-                    "not launching further groups (auth presumed dead)",
+                    "not launching further groups (checking records instead)",
                     start_dt.strftime("%H:%M"),
                 )
                 break
         launched.append(asyncio.create_task(_run_group(group)))
 
     outcomes = [pair for chunk in await asyncio.gather(*launched) for pair in chunk]
+    return await _settle(outcomes, client, target_date, log)
 
+
+async def _settle(
+    outcomes: list[tuple[tuple[int, AvailableSlot], BookingResult]],
+    client: _ClientLike,
+    target_date: date,
+    log: logging.Logger,
+) -> BookingOutcome:
+    """Turn the submit results into the run's outcome, checked against
+    PolyU's booking records (see `_recorded_booking`)."""
     # Groups overlap, so results do not arrive in priority order. Pick the
     # winner by rank (time-major, facility-minor) rather than by arrival.
     successes = sorted(
@@ -333,17 +388,42 @@ async def book_via_http_outcome(
                 "multi-SUCCESS across %d bookings: also booked %s — cancel manually",
                 len(successes), surplus,
             )
+        # A 302 -> make_book_result.do has never lied; the records are only a
+        # cross-check here, so a mismatch warns instead of overriding it.
+        recorded = await _recorded_booking(client, target_date, log)
+        if recorded is None:
+            log.warning(
+                "booking records do not list %s yet; trusting the SUCCESS response",
+                target_date,
+            )
+        elif recorded and recorded != winner_slot:
+            log.warning(
+                "booking records list %s @ %s for %s, not the SUCCESS slot %s @ %s",
+                recorded.facility_name, recorded.start_dt.strftime("%H:%M"), target_date,
+                winner_slot.facility_name, winner_slot.start_dt.strftime("%H:%M"),
+            )
         return BookingOutcome(0, winner_slot)
 
-    # No SUCCESS anywhere. A FATAL now only decides the exit path's log line;
-    # a FATAL alongside a SUCCESS in another group is just PolyU's quota page
-    # rejecting the surplus commit, and is handled by the branch above.
-    if any(r is BookingResult.ERROR_FATAL for _, r in outcomes):
-        log.error(
-            "submit ERROR_FATAL with no SUCCESS among %d ACCEPTED candidates; "
-            "exiting 1 (auth presumed dead)", len(accepted),
+    # No SUCCESS response. Since 2026-10 that does not mean no booking: ask
+    # PolyU's records before reporting a loss.
+    n_fatal = sum(r is BookingResult.ERROR_FATAL for _, r in outcomes)
+    recorded = await _recorded_booking(client, target_date, log)
+    if recorded:
+        log.warning(
+            "no SUCCESS response (%d submits, %d FATAL) but PolyU's records show "
+            "%s @ %s booked for %s; counting it as booked",
+            len(outcomes), n_fatal, recorded.facility_name,
+            recorded.start_dt.strftime("%H:%M"), target_date,
         )
-        return BookingOutcome(1)
+        return BookingOutcome(0, recorded, note=RECORDS_NOTE)
 
-    log.warning("no submit succeeded among %d ACCEPTED candidates; exiting 1", len(accepted))
+    if not outcomes:
+        log.warning("no candidate reached submit; exiting 1")
+    elif n_fatal:
+        log.error(
+            "submit ERROR_FATAL with no SUCCESS among %d submits and nothing in "
+            "the records; exiting 1", len(outcomes),
+        )
+    else:
+        log.warning("no submit succeeded among %d submits; exiting 1", len(outcomes))
     return BookingOutcome(1)

@@ -49,11 +49,6 @@ class Site:
         """"Cancel Booking" page: lists the account's upcoming bookings."""
         return f"{_HOST}/{self.base_path}/secure/ui_cncl_book/cncl_book.do"
 
-    @property
-    def my_record_url(self) -> str:
-        """"My Record" page (diagnostics only)."""
-        return f"{_HOST}/{self.base_path}/secure/ui_my_record/my_record.do"
-
 
 STAFF_SITE = Site("starspossfbns")
 STUDENT_SITE = Site("starspossfbstud")

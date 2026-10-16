@@ -242,16 +242,11 @@ async def book_all(
         except Exception:  # noqa: BLE001 - isolate accounts from each other
             job.log.exception("account %s crashed", job.account.name)
             return _failed(job.account, job.slots, "程序异常，详见 GitHub Actions 日志")
-        if dry_run:
-            # Diagnostic (2026-10-16): what do the record pages look like?
-            for url in (job.client.site.cancel_book_url, job.client.site.my_record_url):
-                text = await job.client.page_text(url)
-                job.log.info("DRY RUN page %s: len=%s text=%r", url, None if text is None else len(text), (text or "")[:4000])
         if outcome.rc != 0:
             return _failed(job.account, job.slots, "没抢到（场地已被占或提交失败）")
         return AccountResult(
             name=job.account.name, notify=job.account.notify_result,
-            slots=job.slots, ok=True, booked=outcome.slot,
+            slots=job.slots, ok=True, booked=outcome.slot, note=outcome.note,
         )
 
     results = list(await asyncio.gather(*(_one(j) for j in jobs)))
