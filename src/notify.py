@@ -47,6 +47,9 @@ class AccountResult:
     ok: bool
     booked: AvailableSlot | None = None
     reason: str = ""
+    # Extra line under a booked result, e.g. that PolyU's records (not the
+    # submit response) confirmed it.
+    note: str = ""
 
 
 def _hours(start: time, end: time) -> str:
@@ -76,6 +79,8 @@ def build_report(
                 f"  时间: {_hours(slot.start_dt.time(), slot.end_dt.time())}",
                 f"  场地: {slot.facility_name} ({slot.center_name})",
             ]
+            if r.note:
+                lines.append(f"  备注: {r.note}")
         elif r.ok:
             headlines.append(f"{r.name} 未实际订场")
             lines += [

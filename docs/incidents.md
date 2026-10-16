@@ -9,6 +9,43 @@ Entry format: **what happened** (with log evidence) → **cause** → **rule**.
 
 ---
 
+## 2026-10-16 — "未订到" emails for courts that were booked; records now decide
+
+The owner reported that the student account held courts for the whole week
+although every result email but Friday's said 未订到. Reading the
+"Cancel Booking" page (`ui_cncl_book/cncl_book.do`) in a dry run on the
+branch confirmed it: student held 19 Oct TN02, 21 Oct TN01, 22 Oct TN02,
+23 Oct TN01 (nothing for 20 Oct); student2 held 23 Oct TN02 20:30. Matched
+against the runs' submit responses:
+
+| run   | target | submit responses (student)                       | records      |
+|-------|--------|--------------------------------------------------|--------------|
+| 10-12 | 10-19  | both `ReadTimeout` (20s budget then)             | TN02 booked  |
+| 10-13 | 10-20  | both 42726-byte "occupied" page → OCCUPIED       | not booked   |
+| 10-14 | 10-21  | TN01 42689-byte page → ERROR_FATAL; TN02 OCCUPIED| TN01 booked  |
+| 10-15 | 10-22  | TN01 302→make_book.do → OCCUPIED; TN02 42689 FATAL| TN02 booked |
+| 10-16 | 10-23  | TN01 302→make_book_result → SUCCESS; TN02 FATAL  | TN01 booked  |
+
+student2 on 10-16: its 20:30 TN02 submit got the 42689 page at 08:30:13
+(`message='Failed to reserve facility. … Tennis Court No. 2 … 08:30 PM'`)
+and the records show exactly that booking — so the page's own text is wrong,
+and the response-only verdict reported FAILED / exit 1 for a booked court.
+
+**Cause:** since PolyU started queueing submits (9–18s), the response to a
+committed booking is no longer reliably the `make_book_result.do` redirect:
+it can be the "Failed to reserve facility" page (42689 bytes) or, when we
+abort first, nothing at all. The exit code and the student email were
+derived from that response alone.
+
+**Rule:** after the submit phase the orchestrator reads the account's
+booking records (`PolyUHttpClient.booking_records`, parsed from the Cancel
+Booking page's visible text) and any tennis booking on the target date wins
+— exit 0, email "订到" plus a 备注 that the records confirmed it. A SUCCESS
+response is still trusted by itself; an unreachable records page keeps the
+submit verdict. The dry run reads the page too, so a template change shows
+up as an empty `booking records:` line before it costs a day. The
+`submit occupied` log line now also carries `message=`.
+
 ## 2026-10-15 — pre-click at 08:29:59.5 (experiment; first live run 10-16)
 
 Follow-up to the entry below. With login, bootstrap and warmup all healthy,

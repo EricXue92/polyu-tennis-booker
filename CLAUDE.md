@@ -162,27 +162,41 @@ Hot path:
 - **The winner is chosen by rank, never by arrival order** — groups overlap,
   so a fast 19:30 answer must not beat a slower 18:30 one. Launching stops
   early once a settled group holds a SUCCESS (don't burn the daily quota on a
-  fallback) or a FATAL with no SUCCESS (auth presumed dead).
+  fallback) or a FATAL with no SUCCESS (auth dead, or — since 2026-10 — the
+  booking went through behind an error page; the records decide).
 - **Two timeout budgets** (`PolyUHttpClient(timeout=6.0,
 submit_timeout=45.0)`). `timeout` guards cell_click/warmup: 150–300ms warm,
   and gathered, so one hang stalls the whole submit phase (retry rounds get
   15s — nothing is queued behind them). `submit_timeout` guards
   make_book_submit.do, which legitimately takes 4–6s+ at 08:30 (9–18s+
-  since 2026-10); connect stays on the short budget. Aborting a submit rolls
-  it back server-side, so waiting always beats giving up `[2026-08-19]`
-  `[2026-10-15]`.
+  since 2026-10); connect stays on the short budget. Aborting a submit
+  usually rolls it back server-side (not always: 10-12 booked through a
+  ReadTimeout), so waiting always beats giving up `[2026-08-19]`
+  `[2026-10-15]` `[2026-10-16]`.
 - **Double-booking is prevented by PolyU's quota, not by us** (one booking
   per day; a surplus commit gets the quota page `[2026-08-29]`). The
   multi-SUCCESS WARNING stays as belt-and-braces. Deliberately no auto-cancel
   path.
-- **Submit result is decided from one response — no waiter race.** Location
-  `make_book_result.do` ⇒ SUCCESS; "occupied" (case-insensitive) in the body
-  or any `make_book*` redirect ⇒ OCCUPIED `[2026-06-07]`; anything else ⇒
-  `ERROR_*`. Every `ERROR_*` from `cell_click`/`submit` logs status +
+- **Submit result is classified from one response — no waiter race.**
+  Location `make_book_result.do` ⇒ SUCCESS; "occupied" (case-insensitive)
+  in the body or any `make_book*` redirect ⇒ OCCUPIED `[2026-06-07]`;
+  anything else ⇒ `ERROR_*`. Every `ERROR_*` from `cell_click`/`submit` logs status +
   Location + body_len + preview + markers + context, with `preview`/`context`
   built from the page's **visible text** (`_visible_text`, `_diag_context`),
   never raw HTML — PolyU error pages are ~30 KB of chrome around one line
   `[2026-09-06]`.
+- **The outcome is confirmed against PolyU's booking records, never from
+  the submit response alone.** After the submit phase (and in a dry run),
+  `_recorded_booking` GETs the "Cancel Booking" page
+  (`Site.cancel_book_url`, parsed by `parse_booking_records`) and any tennis
+  booking on the target date counts as booked — exit 0, result email
+  "订到" with a `备注` line. Since PolyU queues submits, a booking that went
+  through has answered with a ReadTimeout and with the 42689-byte "Failed to
+  reserve facility" page (ERROR_FATAL), and the owner was emailed "未订到"
+  for four booked courts `[2026-10-16]`. A SUCCESS response is still trusted
+  on its own (a records mismatch only warns); an unreachable records page
+  keeps the submit verdict. Keep this off the hot path — it runs only once
+  every launched group has settled.
 
 Hygiene:
 
@@ -219,12 +233,17 @@ Check latencies before suspecting the code:
   _before_ the SUCCESS `[2026-09-17]`.
 - **`cell_click transport error: ReadTimeout` + `retrying them (attempt N)`**
   → PolyU was slow; the retry path is working as designed `[2026-09-20]`.
-- **Open:** a 29640-byte (staff) / 42689-byte (student) ERROR_FATAL page —
-  _not_ the quota page, 37 bytes shorter than that site's OCCUPIED page — and
-  a 403 "There is a problem" page (6174 bytes, student site). Since
-  2026-10-15 every `unexpected` line logs `message=` (text after the last
-  "Make Booking"); read it before assuming what they mean `[2026-09-17]`
-  `[2026-10-15]`. "auth presumed dead" on these is not a login failure.
+- **`no SUCCESS response … but PolyU's records show … counting it as
+  booked`** → the court is booked; the submit answered with an error page or
+  a timeout. The 42689-byte (student) ERROR_FATAL page says "Failed to
+  reserve facility" and has meant a _successful_ booking every time it was
+  checked (10-14, 10-15, 10-16) `[2026-10-16]`; the 42726-byte OCCUPIED page
+  (37 bytes longer) is a real loss (10-13). The staff twin (29640 vs 29677)
+  is presumably the same pair, unconfirmed.
+- **Open:** a 403 "There is a problem" page (6174 bytes, student site).
+  Every `unexpected`/`occupied` line logs `message=` (text after the last
+  "Make Booking"); read it before assuming what a page means `[2026-09-17]`
+  `[2026-10-15]`.
 
 ## Maintenance hooks (when PolyU changes)
 

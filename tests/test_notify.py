@@ -128,3 +128,13 @@ async def test_send_report_swallows_sender_errors(smtp_env):
     sender = _Sender(exc=OSError("smtp down"))
     assert await send_report(_TARGET, [_booked()], dry_run=False, sender=sender) is False
     assert len(sender.calls) == 1
+
+
+def test_report_mentions_when_the_result_came_from_booking_records():
+    result = AccountResult(
+        name="student", notify=True, slots=_SLOTS, ok=True, booked=_slot(19),
+        note="提交响应异常，已按 PolyU 预订记录确认",
+    )
+    subject, body = build_report(_TARGET, [result], dry_run=False)
+    assert "student 订到 19:30 Tennis Court No. 2" in subject
+    assert "提交响应异常，已按 PolyU 预订记录确认" in body

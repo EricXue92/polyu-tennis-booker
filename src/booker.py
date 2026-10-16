@@ -246,7 +246,7 @@ async def book_all(
             return _failed(job.account, job.slots, "没抢到（场地已被占或提交失败）")
         return AccountResult(
             name=job.account.name, notify=job.account.notify_result,
-            slots=job.slots, ok=True, booked=outcome.slot,
+            slots=job.slots, ok=True, booked=outcome.slot, note=outcome.note,
         )
 
     results = list(await asyncio.gather(*(_one(j) for j in jobs)))

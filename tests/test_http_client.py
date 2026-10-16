@@ -1119,3 +1119,89 @@ async def test_cell_click_timeout_override_keeps_short_connect_budget():
     default, override = (c.request.extensions["timeout"] for c in route.calls)
     assert default["read"] == 6.0 and default["connect"] == 6.0
     assert override["read"] == 15.0 and override["connect"] == 6.0
+
+
+# --- Booking records ("Cancel Booking" page), 2026-10-16 ---
+
+_CANCEL_PAGE_TEXT = (
+    "Home > Facility Booking > Cancel Booking Cancel Booking "
+    "Tennis Cancel Shaw Sports Complex Tennis Court No. 1 23 Oct 2026 (Fri) 06:30 PM - 07:30 PM "
+    "Tennis Cancel Shaw Sports Complex Tennis Court No. 2 22 Oct 2026 (Thu) 06:30 PM - 07:30 PM "
+    "Badminton Cancel Kwong On Jubilee Sports Centre Badminton Court No. 12 07 Oct 2026 (Wed) 09:30 PM - 10:30 PM "
+    "Tennis Cancel Shaw Sports Complex Tennis Court No. 2 19 Oct 2026 (Mon) 06:30 PM - 07:30 PM "
+    "Student Activity Personal Activity Timetable"
+)
+
+
+def test_parse_booking_records_extracts_tennis_bookings():
+    from src.http_client import parse_booking_records
+
+    slots = parse_booking_records(_CANCEL_PAGE_TEXT)
+    assert [(s.facility_id, s.start_dt, s.end_dt) for s in slots] == [
+        (10, datetime(2026, 10, 23, 18, 30), datetime(2026, 10, 23, 19, 30)),
+        (11, datetime(2026, 10, 22, 18, 30), datetime(2026, 10, 22, 19, 30)),
+        (11, datetime(2026, 10, 19, 18, 30), datetime(2026, 10, 19, 19, 30)),
+    ]
+    assert slots[0].facility_name == "Tennis Court No. 1"
+    assert slots[0].center_name == "Shaw Sports Complex"
+
+
+def test_parse_booking_records_handles_afternoon_and_noon_times():
+    from src.http_client import parse_booking_records
+
+    text = (
+        "Tennis Cancel Shaw Sports Complex Tennis Court No. 1 04 Apr 2026 (Sat) 12:30 PM - 01:30 PM "
+        "Tennis Cancel Shaw Sports Complex Tennis Court No. 2 05 Apr 2026 (Sun) 11:30 AM - 12:30 PM"
+    )
+    slots = parse_booking_records(text)
+    assert slots[0].start_dt == datetime(2026, 4, 4, 12, 30)
+    assert slots[0].end_dt == datetime(2026, 4, 4, 13, 30)
+    assert slots[1].start_dt == datetime(2026, 4, 5, 11, 30)
+    assert slots[1].end_dt == datetime(2026, 4, 5, 12, 30)
+
+
+def test_parse_booking_records_empty_page():
+    from src.http_client import parse_booking_records
+
+    assert parse_booking_records("Cancel Booking Student Activity") == []
+    assert parse_booking_records("") == []
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_booking_records_fetches_cancel_page_of_the_clients_site():
+    from src.config import STUDENT_SITE
+    from src.http_client import PolyUHttpClient
+
+    html = (
+        "<html><body><nav>Make Booking</nav><table><tr><td>Tennis</td><td>Cancel</td>"
+        "<td>Shaw Sports Complex</td><td>Tennis Court No. 2</td>"
+        "<td>22 Oct 2026 (Thu)</td><td>06:30 PM - 07:30 PM</td></tr></table></body></html>"
+    )
+    route = respx.get(
+        "https://www40.polyu.edu.hk/starspossfbstud/secure/ui_cncl_book/cncl_book.do"
+    ).mock(return_value=Response(200, text=html))
+    client = PolyUHttpClient(
+        cookies={"JSESSIONID": "abc"}, csrf_token="tok-1", fb_user_id="1", site=STUDENT_SITE,
+    )
+    try:
+        slots = await client.booking_records()
+    finally:
+        await client.aclose()
+    assert route.called
+    assert [(s.facility_id, s.start_dt) for s in slots] == [(11, datetime(2026, 10, 22, 18, 30))]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_booking_records_returns_none_when_page_is_not_served():
+    from src.http_client import PolyUHttpClient
+
+    respx.get(
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_cncl_book/cncl_book.do"
+    ).mock(return_value=Response(302, headers={"location": "/starspossfbns/secure/login/loginhome.do"}))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "abc"}, csrf_token="tok-1", fb_user_id="1")
+    try:
+        assert await client.booking_records() is None
+    finally:
+        await client.aclose()

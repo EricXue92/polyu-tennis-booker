@@ -20,12 +20,12 @@ book_via_http:
 import asyncio
 import logging
 import time
-from datetime import date, time as dtime
+from datetime import date, datetime, time as dtime
 
 import pytest
 
 from src.config import TENNIS_FACILITIES
-from src.http_client import BookingResult, CellClickResult, CellOutcome
+from src.http_client import AvailableSlot, BookingResult, CellClickResult, CellOutcome
 
 
 class _FakeClient:
@@ -43,15 +43,24 @@ class _FakeClient:
         submit_results: dict[tuple[int, int], BookingResult] | None = None,
         cell_click_sleep_s: float = 0.0,
         submit_sleeps: dict[tuple[int, int], float] | None = None,
+        records: list | None = None,
     ):
         self._cell = cell_click_outcomes
         self._sub = submit_results or {}
         self._sleep = cell_click_sleep_s
         self._sub_sleeps = submit_sleeps or {}
+        # What PolyU's "Cancel Booking" page lists after the submits; None
+        # means the page could not be fetched.
+        self._records = records
         self.cell_click_calls = []
         self.cell_click_timeouts: list[float | None] = []
         self.submit_calls = []
         self.submit_call_times: list[float] = []
+        self.records_calls = 0
+
+    async def booking_records(self):
+        self.records_calls += 1
+        return self._records
 
     async def cell_click(self, slot, *, timeout=None):
         self.cell_click_calls.append(slot)
@@ -717,3 +726,154 @@ async def test_dry_run_never_awaits_the_trigger():
     assert rc == 0
     assert not trigger.fired
     assert client.cell_click_calls == []
+
+
+# --- Post-submit verification against PolyU's booking records (2026-10-16) ---
+
+def _record(target: date, hour: int, fid: int) -> AvailableSlot:
+    from src.config import TENNIS_CENTER_NAME, TENNIS_CTR_ID, TENNIS_FACILITIES
+    return AvailableSlot(
+        facility_id=fid, facility_name=TENNIS_FACILITIES[fid],
+        center_id=TENNIS_CTR_ID, center_name=TENNIS_CENTER_NAME,
+        start_dt=datetime.combine(target, dtime(hour, 30)),
+        end_dt=datetime.combine(target, dtime(hour + 1, 30)),
+    )
+
+
+@pytest.mark.asyncio
+async def test_records_show_booking_when_every_submit_response_said_otherwise():
+    """2026-10-14/15: the court was booked although the submit answered with
+    the 42689-byte 'Failed to reserve facility' page (ERROR_FATAL)."""
+    from src.http_booker import book_via_http_outcome
+
+    target = date(2026, 10, 21)
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results={**_all_submit(BookingResult.OCCUPIED),
+                        (18, _FACILITY_IDS[0]): BookingResult.ERROR_FATAL},
+        records=[_record(target, 18, _FACILITY_IDS[0])],
+    )
+    outcome = await book_via_http_outcome(client, target, _PRIORITY, dry_run=False, log=_LOG)
+    assert outcome.rc == 0
+    assert outcome.slot == _record(target, 18, _FACILITY_IDS[0])
+    assert outcome.note  # the email says the result came from the records
+    assert client.records_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_records_show_booking_after_submit_timeouts():
+    """2026-10-12: both submits died on ReadTimeout, the booking still went through."""
+    from src.http_booker import book_via_http_outcome
+
+    target = date(2026, 10, 19)
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results=_all_submit(BookingResult.ERROR_TRANSIENT),
+        records=[_record(target, 18, _FACILITY_IDS[1])],
+    )
+    outcome = await book_via_http_outcome(client, target, _PRIORITY, dry_run=False, log=_LOG)
+    assert outcome.rc == 0
+    assert outcome.slot.facility_id == _FACILITY_IDS[1]
+
+
+@pytest.mark.asyncio
+async def test_records_for_other_dates_do_not_count():
+    from src.http_booker import book_via_http_outcome
+
+    target = date(2026, 10, 20)
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results=_all_submit(BookingResult.OCCUPIED),
+        records=[_record(date(2026, 10, 21), 18, _FACILITY_IDS[0])],
+    )
+    outcome = await book_via_http_outcome(client, target, _PRIORITY, dry_run=False, log=_LOG)
+    assert outcome.rc == 1
+    assert outcome.slot is None
+
+
+@pytest.mark.asyncio
+async def test_unfetchable_records_keep_the_submit_verdict():
+    from src.http_booker import book_via_http_outcome
+
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results=_all_submit(BookingResult.OCCUPIED),
+        records=None,
+    )
+    outcome = await book_via_http_outcome(
+        client, date(2026, 10, 20), _PRIORITY, dry_run=False, log=_LOG,
+    )
+    assert outcome.rc == 1
+    assert client.records_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_success_is_kept_even_if_records_disagree(caplog):
+    """A 302 -> make_book_result.do is trusted; a records mismatch only warns."""
+    from src.http_booker import book_via_http_outcome
+
+    target = date(2026, 10, 23)
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results={**_all_submit(BookingResult.OCCUPIED),
+                        (18, _FACILITY_IDS[0]): BookingResult.SUCCESS},
+        records=[],
+    )
+    with caplog.at_level(logging.WARNING, logger="test"):
+        outcome = await book_via_http_outcome(client, target, _PRIORITY, dry_run=False, log=_LOG)
+    assert outcome.rc == 0
+    assert outcome.slot.facility_id == _FACILITY_IDS[0]
+    assert not outcome.note
+    assert any("records" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_success_confirmed_by_records_is_quiet(caplog):
+    from src.http_booker import book_via_http_outcome
+
+    target = date(2026, 10, 23)
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results={**_all_submit(BookingResult.OCCUPIED),
+                        (18, _FACILITY_IDS[0]): BookingResult.SUCCESS},
+        records=[_record(target, 18, _FACILITY_IDS[0])],
+    )
+    with caplog.at_level(logging.WARNING, logger="test"):
+        outcome = await book_via_http_outcome(client, target, _PRIORITY, dry_run=False, log=_LOG)
+    assert outcome.rc == 0
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+@pytest.mark.asyncio
+async def test_no_accepted_cell_still_checks_records():
+    """A booking made by hand (or by a refused-looking click) still counts."""
+    from src.http_booker import book_via_http_outcome
+
+    target = date(2026, 10, 20)
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.OCCUPIED),
+        records=[_record(target, 18, _FACILITY_IDS[0])],
+        cell_click_sleep_s=0.0,
+    )
+    outcome = await book_via_http_outcome(
+        client, target, _PRIORITY, dry_run=False, log=_LOG,
+        cell_retry_window_s=0.0,
+    )
+    assert outcome.rc == 0
+    assert outcome.slot.facility_id == _FACILITY_IDS[0]
+
+
+@pytest.mark.asyncio
+async def test_dry_run_reads_records_but_never_clicks():
+    from src.http_booker import book_via_http_outcome
+
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        records=[_record(date(2026, 10, 23), 18, _FACILITY_IDS[0])],
+    )
+    outcome = await book_via_http_outcome(
+        client, date(2026, 10, 23), _PRIORITY, dry_run=True, log=_LOG,
+    )
+    assert outcome.rc == 0 and outcome.slot is None
+    assert client.cell_click_calls == [] and client.submit_calls == []
+    assert client.records_calls == 1

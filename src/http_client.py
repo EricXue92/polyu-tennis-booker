@@ -232,6 +232,45 @@ def _fmt_polyu_dt(dt: datetime) -> str:
     return f"{dt.day:02d} {_MONTH_ABBR[dt.month]} {dt.year} {dt.hour:02d}:{dt.minute:02d}"
 
 
+# One row of the "Cancel Booking" table as visible text, e.g.
+# "Tennis Court No. 1 23 Oct 2026 (Fri) 06:30 PM - 07:30 PM" (observed
+# 2026-10-16 on the student site; the staff site shares the template).
+_BOOKING_ROW_RE = re.compile(
+    r"(?P<facility>Tennis Court No\. \d+)\s+"
+    r"(?P<date>\d{1,2} [A-Z][a-z]{2} \d{4})\s+\([A-Za-z]{3}\)\s+"
+    r"(?P<start>\d{1,2}:\d{2} [AP]M)\s*-\s*(?P<end>\d{1,2}:\d{2} [AP]M)"
+)
+
+
+def parse_booking_records(text: str | None) -> list[AvailableSlot]:
+    """Tennis bookings listed in the visible text of the "Cancel Booking"
+    page, in page order. Facilities not in TENNIS_FACILITIES are skipped."""
+    from src.config import TENNIS_CENTER_NAME, TENNIS_CTR_ID, TENNIS_FACILITIES
+
+    if not text:
+        return []
+    by_name = {name: fid for fid, name in TENNIS_FACILITIES.items()}
+    out: list[AvailableSlot] = []
+    for m in _BOOKING_ROW_RE.finditer(text):
+        fid = by_name.get(m.group("facility"))
+        if fid is None:
+            continue
+        try:
+            start = datetime.strptime(f"{m.group('date')} {m.group('start')}", "%d %b %Y %I:%M %p")
+            end = datetime.strptime(f"{m.group('date')} {m.group('end')}", "%d %b %Y %I:%M %p")
+        except ValueError:
+            continue
+        out.append(AvailableSlot(
+            facility_id=fid,
+            facility_name=TENNIS_FACILITIES[fid],
+            center_id=TENNIS_CTR_ID,
+            center_name=TENNIS_CENTER_NAME,
+            start_dt=start,
+            end_dt=end,
+        ))
+    return out
+
+
 class PolyUHttpClient:
     """Async HTTP client for PolyU booking endpoints.
 
@@ -329,6 +368,43 @@ class PolyUHttpClient:
             except httpx.HTTPError:
                 return -1
         return await asyncio.gather(*(_one() for _ in range(n)))
+
+    async def page_text(self, url: str, *, timeout: float | None = None) -> str | None:
+        """GET `url` and return its visible text; None on transport error or
+        non-200. Off the hot path (booking verification, diagnostics)."""
+        try:
+            resp = await self._http.get(
+                url,
+                timeout=timeout if timeout is not None else self._submit_timeout,
+                headers={
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Referer": self.site.make_book_url,
+                },
+            )
+        except httpx.HTTPError as exc:
+            _LOG.warning("page_text %s transport error: %r", url, exc)
+            return None
+        if resp.status_code != 200:
+            _LOG.warning(
+                "page_text %s unexpected (status=%d, location=%r, body_len=%d)",
+                url, resp.status_code, resp.headers.get("location", ""), len(resp.text or ""),
+            )
+            return None
+        return _visible_text(resp.text)
+
+    async def booking_records(self) -> list[AvailableSlot] | None:
+        """The account's upcoming tennis bookings as PolyU lists them on the
+        "Cancel Booking" page; None if the page could not be fetched.
+
+        This is the ground truth the orchestrator checks after the submit
+        phase: since 2026-10 a submit whose booking went through has answered
+        with a ReadTimeout (10-12) and with the 42689-byte "Failed to reserve
+        facility" page (10-14, 10-15, 10-16), see docs/incidents.md.
+        """
+        text = await self.page_text(self.site.cancel_book_url)
+        if text is None:
+            return None
+        return parse_booking_records(text)
 
     async def search(
         self,
@@ -598,8 +674,9 @@ class PolyUHttpClient:
             # make_book*); log which one so contested runs (e.g. 2026-08-28,
             # 4/4 OCCUPIED) are distinguishable from CI logs alone.
             _LOG.info(
-                "submit occupied (status=%d, location=%r, body_len=%d, markers=%s)",
+                "submit occupied (status=%d, location=%r, body_len=%d, markers=%s, message=%r)",
                 resp.status_code, location, len(body), _diag_markers(body),
+                _page_message(body),
             )
             return BookingResult.OCCUPIED
         err = _classify_http_error(resp.status_code)
