@@ -63,13 +63,16 @@ def test_student_books_odd_hours_on_weekends():
     assert student_slot_priority_for(date(2026, 9, 20)) == expected  # Sunday
 
 
-def test_student_books_only_1830_on_weekdays():
+def test_student_weekday_ladder_prefers_1830_then_any_evening_hour():
     from src.config import student_slot_priority_for
 
-    # One rung, no fallback: the owner wants 18:30-19:30 or nothing.
     for day in range(14, 19):  # Mon 2026-09-14 .. Fri 2026-09-18
         assert student_slot_priority_for(date(2026, 9, day)) == (
             (time(18, 30), time(19, 30)),
+            (time(17, 30), time(18, 30)),
+            (time(19, 30), time(20, 30)),
+            (time(20, 30), time(21, 30)),
+            (time(21, 30), time(22, 30)),
         )
 
 
