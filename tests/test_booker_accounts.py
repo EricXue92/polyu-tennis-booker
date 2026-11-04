@@ -14,6 +14,14 @@ from src.http_client import BookingResult, CellOutcome
 from tests.test_bootstrap import _FakePage, _FIXTURE_HTML
 from tests.test_http_booker import _FakeClient
 
+_STUDENT_WEEKDAY_LADDER = [
+    (time(18, 30), time(19, 30)),
+    (time(17, 30), time(18, 30)),
+    (time(19, 30), time(20, 30)),
+    (time(20, 30), time(21, 30)),
+    (time(21, 30), time(22, 30)),
+]
+
 
 def test_active_jobs_both_accounts_on_weekend():
     from src.booker import active_jobs
@@ -36,7 +44,7 @@ def test_active_jobs_student_and_student2_on_wednesday_and_friday():
     for d in (date(2026, 10, 14), date(2026, 10, 16)):  # Wednesday, Friday
         jobs = active_jobs(d, ACCOUNTS)
         assert [a.name for a, _ in jobs] == ["student", "student2"]
-        assert jobs[0][1] == [(time(18, 30), time(19, 30))]
+        assert jobs[0][1] == _STUDENT_WEEKDAY_LADDER
         assert jobs[1][1] == [
             (time(18, 30), time(19, 30)),
             (time(19, 30), time(20, 30)),
@@ -50,7 +58,7 @@ def test_active_jobs_student_only_on_monday_tuesday_thursday():
     for d in (date(2026, 10, 12), date(2026, 10, 13), date(2026, 10, 15)):
         jobs = active_jobs(d, ACCOUNTS)
         assert [a.name for a, _ in jobs] == ["student"]
-        assert jobs[0][1] == [(time(18, 30), time(19, 30))]
+        assert jobs[0][1] == _STUDENT_WEEKDAY_LADDER
 
 
 @pytest.mark.asyncio

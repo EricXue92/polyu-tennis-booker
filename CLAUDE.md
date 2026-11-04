@@ -79,9 +79,9 @@ client.
 - **Staff** (`POLYU_USERNAME`/`POLYU_PASSWORD`): weekends only since
   2026-10-08, rule `slot_priority_for`.
 - **Student** (`POLYU_STUDENT_USERNAME`/`POLYU_STUDENT_PASSWORD`): every
-  day, rule `student_slot_priority_for`. Weekdays (since 2026-10-11) it tries
-  `_STUDENT_WEEKDAY_SLOTS` — 18:30 only, both courts, deliberately no
-  fallback, so a lost 18:30 is an exit 1. Weekends: the owner wants two
+  day, rule `student_slot_priority_for`. Weekdays (since 2026-11-04) it tries
+  `_STUDENT_WEEKDAY_SLOTS` — 18:30 → 17:30 → 19:30 → 20:30 → 21:30, both
+  courts, so only losing all five is an exit 1. Weekends: the owner wants two
   consecutive hours, one per account, so the evening is split by parity: staff
   takes the **even** hours (18:30 → 20:30), student the **odd** hours (17:30 →
   19:30 → 21:30), both on both courts. Both fire at 08:30 blind to each
@@ -90,9 +90,9 @@ client.
 - **Student2** (`POLYU_STUDENT2_USERNAME`/`POLYU_STUDENT2_PASSWORD`, student
   site): Wednesday and Friday targets only (`_STUDENT2_WEEKDAYS`), rule
   `student2_slot_priority_for`, trying `SLOT_PRIORITY` (any one hour of
-  18:30–21:30). `student` fires alongside it those days on 18:30 only; the
-  two may each take a court at 18:30 or end up on different hours — accepted
-  by the owner, there is no weekday split.
+  18:30–21:30). `student` fires alongside it those days on its own ladder; the
+  two may each take a court at the same hour or end up on different (possibly
+  non-adjacent) hours — there is no weekday split.
 - **Student result email.** Accounts with `notify_result=True` (only
   `student`) get their outcome emailed after every run they take part in —
   now every day. `src/notify.py` uses Gmail SMTP
@@ -267,7 +267,7 @@ Check latencies before suspecting the code:
 
 - Slot preferences: per-account rules in `src/config.py` (tuples of
   `(start, end)`, tried in order). `SLOT_PRIORITY` (18:30 → 19:30 → 20:30) is
-  the weekday ladder student2 uses (`student` takes only its first rung via
+  the weekday ladder student2 uses (`student` has its own,
   `_STUDENT_WEEKDAY_SLOTS`); the third rung is cheap insurance on
   contested evenings `[2026-09-16]`.
 - Trigger time: `TRIGGER_TIME_HKT` in `src/config.py`.
@@ -281,10 +281,10 @@ Each account's rule in `src/config.py` decides which target weekdays it books.
 When every account's rule returns `()`, `run()` short-circuits with exit 0
 (no sleep, no Playwright launch) — the watchdog treats the day as accounted
 for and does not open an issue; no day currently hits that path. Currently
-(since 2026-10-11):
+(since 2026-11-04):
 
-- **Mon / Tue / Thu:** student only, 18:30.
-- **Wed / Fri:** student 18:30 only; student2 18:30 → 19:30 → 20:30.
+- **Mon / Tue / Thu:** student only, 18:30 → 17:30 → 19:30 → 20:30 → 21:30.
+- **Wed / Fri:** student on that same ladder; student2 18:30 → 19:30 → 20:30.
 - **Sat / Sun:** staff takes `_STAFF_WEEKEND_SLOTS` (18:30, 20:30), student
   takes `_STUDENT_WEEKEND_SLOTS` (17:30, 19:30, 21:30) — see "Accounts and
   sites" for why the parity split matters.
