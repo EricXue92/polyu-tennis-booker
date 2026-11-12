@@ -9,6 +9,51 @@ Entry format: **what happened** (with log evidence) → **cause** → **rule**.
 
 ---
 
+## 2026-11-12 — three days lost to `ubuntu-latest`; pre-click stall on the 10-candidate ladder
+
+Two unrelated findings from one review of the runs since 2026-10-25.
+
+**1. Runs of 11-10, 11-11, 11-12 never started the booker.** `ubuntu-latest`
+moved from ubuntu-24.04 (run of 11-09) to ubuntu-26.04 (11-10 onwards) and
+the "Install Playwright Chromium" step died after ~20s:
+`Cannot install dependencies for ubuntu26.04-x64 with Playwright 1.59.1!
+Error: ERROR: Playwright does not support chromium on ubuntu26.04-x64`.
+
+**Rule:** `runs-on: ubuntu-24.04`. Bump the image only together with a
+Playwright that supports it, after a dry run on a branch.
+
+**2. Every weekday run on the new 5-hour student ladder submitted ~6s late.**
+The ladder (10 candidates) went live for the run of 11-05. On all three
+weekday runs since, exactly 7 of 10 pre-clicks were ACCEPTED and 3 died on
+`ReadTimeout`, and the first submit left late:
+
+| run   | pre-click result            | "submitting now" |
+|-------|-----------------------------|------------------|
+| 11-05 | 7/10, ranks 2,6,9 timed out (6.55s) | 08:30:06.058 |
+| 11-06 | 7/10, ranks 7,8,9 timed out (6.69s) | 08:30:06.203 |
+| 11-09 | 7/10, ranks 6,8,9 timed out (7.0–7.4s) | 08:30:06.915 |
+
+All three still booked 17:30 and none got the preferred 18:30. Runs with ≤ 6
+candidates (student2, weekend student/staff) were 6/6 or 4/4 at ~170ms on the
+same days.
+
+**Cause:** two things compounding. (a) `max_keepalive_connections=8`: of the
+10 sockets the warmup opened, httpx kept 8, so at least two cell_clicks
+opened a fresh connection (the ~0.5s on top of the 6s read timeout) and
+their POST reached PolyU after 08:30:00, into the queue. This part is
+inferred from the latencies and the 8-vs-10 arithmetic, not observed
+directly — watch the next weekday run. (b) The pre-click round was
+`asyncio.gather`ed _before_ the trigger was awaited, so the submits waited
+for the slowest click's full timeout.
+
+**Rules:**
+
+- `max_keepalive_connections` (16) ≥ the largest candidate set;
+  `max_connections` 16 → 32.
+- The trigger never waits for the pre-click round: at 08:30:00.000 the
+  ACCEPTED candidates are submitted and clicks still in flight are dropped.
+  If nothing is ACCEPTED yet the round is awaited to its end as before.
+
 ## 2026-10-16 — "未订到" emails for courts that were booked; records now decide
 
 The owner reported that the student account held courts for the whole week
