@@ -220,15 +220,7 @@ async def book_via_http_outcome(
         await _recorded_booking(client, target_date, log)
         return BookingOutcome(0)
 
-    async def _click_round() -> list[CellClickResult]:
-        # Parallel cell-clicks.
-        # return_exceptions=False - cell_click catches httpx.HTTPError
-        # internally and returns ERROR_TRANSIENT. Any uncaught exception is a
-        # real bug and should crash the run with a traceback in CI, not be
-        # silently swallowed.
-        results: list[CellClickResult] = list(await asyncio.gather(
-            *(client.cell_click(slot) for slot in candidates)
-        ))
+    def _log_round(results: list[CellClickResult]) -> list[CellClickResult]:
         for rank, cr in enumerate(results):
             log.info(
                 "rank=%d %s: cell=%s (latency=%dms)",
@@ -236,12 +228,70 @@ async def book_via_http_outcome(
             )
         return results
 
-    # Phase 1: cell-click round (pre-click when a trigger is supplied).
-    cell_results = await _click_round()
+    async def _click_round() -> list[CellClickResult]:
+        # Parallel cell-clicks.
+        # return_exceptions=False - cell_click catches httpx.HTTPError
+        # internally and returns ERROR_TRANSIENT. Any uncaught exception is a
+        # real bug and should crash the run with a traceback in CI, not be
+        # silently swallowed.
+        return _log_round(list(await asyncio.gather(
+            *(client.cell_click(slot) for slot in candidates)
+        )))
 
-    if wait_for_trigger is not None:
+    async def _preclick_round(trigger: TriggerWait) -> list[CellClickResult]:
+        """Fire the round, then wait for the trigger - never for the round.
+
+        The round used to be gathered before the trigger was awaited, so one
+        hung click held every submit: on 2026-11-05/06/09 three of ten
+        pre-clicks ran into the 6s ReadTimeout and the submits left at
+        08:30:06+. Now whatever is ACCEPTED when the trigger fires is
+        submitted, and clicks still in flight are dropped (reported as
+        ERROR_TRANSIENT). Only when nothing is ACCEPTED yet is the round
+        awaited to its end - nothing is ready to submit, so that costs nothing.
+        """
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        tasks = [asyncio.ensure_future(client.cell_click(slot)) for slot in candidates]
+        try:
+            # Let every click start (and put its request on the wire) before
+            # the trigger coroutine gets to run.
+            await asyncio.sleep(0)
+            await trigger()
+            if not any(
+                t.done() and not t.cancelled() and t.exception() is None
+                and t.result().outcome is CellOutcome.ACCEPTED
+                for t in tasks
+            ):
+                await asyncio.wait(tasks)
+        except BaseException:
+            for t in tasks:
+                t.cancel()
+            raise
+        results: list[CellClickResult] = []
+        dropped = 0
+        for slot, t in zip(candidates, tasks):
+            if t.done():
+                results.append(t.result())  # re-raises a real bug
+            else:
+                t.cancel()
+                dropped += 1
+                results.append(CellClickResult(
+                    slot=slot, outcome=CellOutcome.ERROR_TRANSIENT,
+                    latency_ms=int((loop.time() - t0) * 1000),
+                ))
+        if dropped:
+            log.warning(
+                "pre-click: %d cell_click(s) still in flight at the trigger; "
+                "submitting without them", dropped,
+            )
+        return _log_round(results)
+
+    # Phase 1: cell-click round (pre-click when a trigger is supplied).
+    if wait_for_trigger is None:
+        cell_results = await _click_round()
+    else:
+        cell_results = await _preclick_round(wait_for_trigger)
         n_accepted = sum(cr.outcome is CellOutcome.ACCEPTED for cr in cell_results)
-        await wait_for_trigger()
         if n_accepted:
             log.info(
                 "pre-click: %d/%d ACCEPTED before trigger; submitting now",

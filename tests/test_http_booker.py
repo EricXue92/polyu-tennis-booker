@@ -44,8 +44,10 @@ class _FakeClient:
         cell_click_sleep_s: float = 0.0,
         submit_sleeps: dict[tuple[int, int], float] | None = None,
         records: list | None = None,
+        cell_click_sleeps: dict[tuple[int, int], float] | None = None,
     ):
         self._cell = cell_click_outcomes
+        self._cell_sleeps = cell_click_sleeps or {}
         self._sub = submit_results or {}
         self._sleep = cell_click_sleep_s
         self._sub_sleeps = submit_sleeps or {}
@@ -68,6 +70,8 @@ class _FakeClient:
         if self._sleep:
             await asyncio.sleep(self._sleep)
         key = (slot.start_dt.hour, slot.facility_id)
+        if key in self._cell_sleeps:
+            await asyncio.sleep(self._cell_sleeps[key])
         outcome = self._cell[key]
         if isinstance(outcome, list):
             # Scripted per-attempt outcomes; the last one repeats forever.
@@ -711,6 +715,64 @@ async def test_preclick_all_transient_waits_for_trigger_before_retrying():
     assert rc == 0
     assert trigger.cell_clicks_before == 4
     assert len(client.cell_click_calls) == 8
+
+
+@pytest.mark.asyncio
+async def test_hung_preclick_does_not_delay_the_submits_past_the_trigger():
+    from src.http_booker import book_via_http
+
+    # 2026-11-05/06/09: 3 of 10 pre-clicks hung to the 6s ReadTimeout and the
+    # gathered round held every submit until 08:30:06+. The trigger must fire
+    # the submits for whatever is ACCEPTED by then.
+    hung = (19, _FACILITY_IDS[1])
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results={**_all_submit(BookingResult.OCCUPIED),
+                        (18, _FACILITY_IDS[0]): BookingResult.SUCCESS},
+        cell_click_sleeps={hung: 5.0},
+    )
+
+    async def trigger() -> None:
+        await asyncio.sleep(0.05)
+
+    t0 = time.perf_counter()
+    rc = await book_via_http(
+        client, date(2026, 6, 10), _PRIORITY, dry_run=False, log=_LOG,
+        wait_for_trigger=trigger,
+    )
+    assert rc == 0
+    assert time.perf_counter() - t0 < 1.0
+    assert client.submit_call_times[0] - t0 < 0.5
+    # The straggler is dropped, not re-clicked and not submitted.
+    assert len(client.cell_click_calls) == 4
+    assert hung not in {(s.start_dt.hour, s.facility_id) for s in client.submit_calls}
+
+
+@pytest.mark.asyncio
+async def test_preclick_with_nothing_accepted_at_trigger_waits_for_stragglers():
+    from src.http_booker import book_via_http
+
+    # Nothing ACCEPTED when the trigger fires but one click is still in
+    # flight: nothing is ready to submit, so finish the round instead of
+    # abandoning the only candidate that may still land.
+    slow = (18, _FACILITY_IDS[0])
+    client = _FakeClient(
+        cell_click_outcomes={**_all_cell(CellOutcome.OCCUPIED),
+                             slow: CellOutcome.ACCEPTED},
+        submit_results={slow: BookingResult.SUCCESS},
+        cell_click_sleeps={slow: 0.2},
+    )
+
+    async def trigger() -> None:
+        await asyncio.sleep(0.05)
+
+    rc = await book_via_http(
+        client, date(2026, 6, 10), _PRIORITY, dry_run=False, log=_LOG,
+        wait_for_trigger=trigger,
+    )
+    assert rc == 0
+    assert len(client.cell_click_calls) == 4
+    assert [(s.start_dt.hour, s.facility_id) for s in client.submit_calls] == [slow]
 
 
 @pytest.mark.asyncio

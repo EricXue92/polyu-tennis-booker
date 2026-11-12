@@ -322,13 +322,18 @@ class PolyUHttpClient:
             headers=_DEFAULT_HEADERS,
             timeout=timeout,
             follow_redirects=False,  # We need to inspect 302 Location ourselves.
-            # Normally only the warm keepalive sockets are used. The headroom
-            # above them is for a run whose warmup GETs are still in flight at
-            # 08:30 (booker.warm_all fires regardless): the cell_clicks must be
-            # able to open fresh connections instead of queueing on the pool.
+            # Normally only the warm keepalive sockets are used, so every
+            # warmed socket has to be kept: with max_keepalive_connections=8
+            # and the 10-candidate weekday ladder, httpx closed two of the ten
+            # warmed sockets and those cell_clicks paid a cold handshake into
+            # the 08:30 stampede, hanging to the 6s timeout [2026-11-12].
+            # The headroom above the keepalives is for a run whose warmup GETs
+            # are still in flight at 08:30 (booker.warm_all fires regardless):
+            # the cell_clicks must be able to open fresh connections instead
+            # of queueing on the pool.
             limits=httpx.Limits(
-                max_connections=16,
-                max_keepalive_connections=8,
+                max_connections=32,
+                max_keepalive_connections=16,
             ),
         )
 

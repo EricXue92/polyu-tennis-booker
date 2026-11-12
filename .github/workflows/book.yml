@@ -21,7 +21,11 @@ on:
 
 jobs:
   book:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: when the label moved to ubuntu-26.04
+    # (2026-11-10) `playwright install --with-deps` failed ("Playwright does
+    # not support chromium on ubuntu26.04-x64") and three days were lost
+    # before the booker even started. Bump only after a dry run on a branch.
+    runs-on: ubuntu-24.04
     # Job timeout must absorb: GH Actions runner queue (occasionally 30+ min)
     # + cold runner setup (~3 min) + Chromium install (~2 min) + sleep until
     # 08:30 HKT (up to ~60 min from 07:30 cron) + booking flow (~30 s). 90 min

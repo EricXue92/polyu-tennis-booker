@@ -135,12 +135,18 @@ Timing:
   `[2026-10-15]`. If the pre-open click yields no ACCEPTED, the flow re-clicks
   at 08:30 (the old behaviour); a `pre-click: nothing ACCEPTED` WARNING means
   PolyU refused it — read the cell results before touching the lead time.
+- **The trigger never waits for the pre-click round.** At 08:30:00.000 the
+  flow submits whatever is ACCEPTED; clicks still in flight are dropped
+  (`pre-click: N cell_click(s) still in flight` WARNING). A gathered round
+  let 3 hung clicks hold every submit until 08:30:06+ `[2026-11-12]`. Only
+  when nothing is ACCEPTED yet is the round awaited to its end.
 - **Warmup never delays the trigger.** `booker.warm_all` waits only until
   the pre-click; stragglers keep running (not cancelled — they still add warm
-  sockets) and the fire goes out on time, `max_connections=16` leaving room
-  for cold connections. Don't start the warmup earlier instead: PolyU drops
-  idle keepalives after ~5s, so `WARMUP_LEAD_SECONDS` must stay small
-  `[2026-09-20]`.
+  sockets) and the fire goes out on time, `max_connections=32` leaving room
+  for cold connections. `max_keepalive_connections` must stay ≥ the largest
+  candidate set (10), or httpx closes warmed sockets `[2026-11-12]`. Don't
+  start the warmup earlier instead: PolyU drops idle keepalives after ~5s,
+  so `WARMUP_LEAD_SECONDS` must stay small `[2026-09-20]`.
 
 Hot path:
 
@@ -214,6 +220,9 @@ Hygiene:
 - **Tests are offline.** Everything in `tests/` uses fakes (e.g.
   `_FakeClient`) — no network, no Playwright. Don't add live integration
   tests; verify with `--dry-run` against the real site.
+- **The runner image is pinned** (`runs-on: ubuntu-24.04`, not
+  `ubuntu-latest`): the label's move to 26.04 broke `playwright install` and
+  cost three days `[2026-11-12]`. Bump it only after a dry run on a branch.
 - **CI sets `TZ: Asia/Hong_Kong`** — `dates.py:now_hkt()` assumes it. Don't
   remove it from `.github/workflows/book.yml`.
 

@@ -4,6 +4,7 @@ Playwright login is not exercised here; these cover the pure pieces that
 decide which accounts run and how their concurrent results collapse into
 one exit code.
 """
+import asyncio
 import logging
 from datetime import date, time
 
@@ -276,6 +277,9 @@ async def test_book_all_passes_the_trigger_to_every_account():
     async def trigger() -> None:
         nonlocal fired
         fired += 1
+        # The real trigger sleeps until 08:30:00; yield like it does so every
+        # account's pre-click round (started concurrently) gets to run.
+        await asyncio.sleep(0)
         # Both accounts have pre-clicked, nobody has submitted yet.
         assert len(staff.cell_click_calls) == 2 and len(student.cell_click_calls) == 2
         assert staff.submit_calls == [] and student.submit_calls == []

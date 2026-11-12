@@ -751,11 +751,15 @@ async def test_client_sets_connection_pool_limits():
         # httpx.Limits is stored on the transport pool; access via the private
         # _pool attribute. Brittle vs httpx internals but worth the lock-in.
         pool = client._http._transport._pool
-        # 8 keepalive sockets cover the largest candidate set (6); the extra
-        # max_connections headroom lets cell_clicks open fresh connections
-        # when warmup GETs are still in flight at 08:30 (2026-09-20).
-        assert pool._max_connections == 16
-        assert pool._max_keepalive_connections == 8
+        # Every warmed socket must survive until the pre-click: the largest
+        # candidate set is 10 (student weekday ladder, 5 hours x 2 courts),
+        # and with 8 keepalives the other 2+ cell_clicks paid a cold
+        # handshake into the 08:30 stampede and hung (2026-11-05). The
+        # headroom above that is for warmup GETs still in flight.
+        from src.config import _STUDENT_WEEKDAY_SLOTS, TENNIS_FACILITIES
+        largest = len(_STUDENT_WEEKDAY_SLOTS) * len(TENNIS_FACILITIES)
+        assert pool._max_keepalive_connections >= largest
+        assert pool._max_connections >= 2 * largest
     finally:
         await client.aclose()
 
