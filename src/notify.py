@@ -17,11 +17,13 @@ public, so no address is hardcoded here.
 from __future__ import annotations
 
 import asyncio
+import email.policy
 import os
 import smtplib
 from dataclasses import dataclass
 from datetime import date, time
 from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
 from typing import Callable, Sequence
 
 from src.http_client import AvailableSlot
@@ -101,10 +103,24 @@ def build_report(
     return subject, "\n".join(lines)
 
 
-def _smtp_send(msg: EmailMessage, username: str, password: str) -> None:
+def _smtp_send(msg: EmailMessage, username: str, password: str) -> str:
+    """Send `msg` and return Gmail's reply to the DATA command.
+
+    The reply carries Gmail's queue id — the only proof of what the server did
+    with a message that was "sent" but never showed up in the mailbox.
+    """
     with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS) as smtp:
         smtp.login(username, password)
-        smtp.send_message(msg)
+        code, resp = smtp.mail(username)
+        if code != 250:
+            raise smtplib.SMTPSenderRefused(code, resp, username)
+        code, resp = smtp.rcpt(msg["To"])
+        if code not in (250, 251):
+            raise smtplib.SMTPRecipientsRefused({msg["To"]: (code, resp)})
+        code, resp = smtp.data(msg.as_bytes(policy=email.policy.SMTP))
+        if code != 250:
+            raise smtplib.SMTPDataError(code, resp)
+        return f"{code} {resp.decode('ascii', 'replace')}"
 
 
 async def send_report(
@@ -112,7 +128,7 @@ async def send_report(
     results: Sequence[AccountResult],
     *,
     dry_run: bool,
-    sender: Callable[[EmailMessage, str, str], None] = _smtp_send,
+    sender: Callable[[EmailMessage, str, str], str | None] = _smtp_send,
 ) -> bool:
     """Email the report. Returns True if sent; never raises."""
     username = os.environ.get("SMTP_USERNAME", "")
@@ -131,11 +147,14 @@ async def send_report(
     msg["From"] = username
     msg["To"] = os.environ.get("NOTIFY_EMAIL_TO") or username
     msg["Subject"] = subject
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid(domain="polyu-tennis-booker.invalid")
     msg.set_content(body)
     try:
-        await asyncio.to_thread(sender, msg, username, password)
+        reply = await asyncio.to_thread(sender, msg, username, password)
     except Exception as exc:  # noqa: BLE001 - the email must never fail the run
         log.warning("result email failed: %r", exc)
         return False
     log.info("result email sent: %s", subject)
+    log.info("result email accepted: message-id=%s server-reply=%s", msg["Message-ID"], reply)
     return True
