@@ -161,6 +161,9 @@ Hot path:
   `http_booker.py`: rounds for up to 45s, 15s per request, paced ≥1s). No
   retry once anything is ACCEPTED — a ready submit must not wait on a slow
   sibling. A timeout says nothing about the slot `[2026-09-20]`.
+- **A cell-click 403 is re-clicked after a CSRFToken refresh**, at most
+  `CELL_403_REFRESH_MAX` times, only while nothing is ACCEPTED; any other
+  cell-click ERROR_FATAL stays final `[2026-11-14]`.
 - **Submits: concurrent within a group, groups staggered, never serial**
   (`SUBMIT_STAGGER_SECONDS = 2.5`: group N+1 launches when earlier groups
   settle or the stagger elapses). Serial submits let one hung rank-0 lock out
@@ -249,7 +252,12 @@ Check latencies before suspecting the code:
   checked (10-14, 10-15, 10-16) `[2026-10-16]`; the 42726-byte OCCUPIED page
   (37 bytes longer) is a real loss (10-13). The staff twin (29640 vs 29677)
   is presumably the same pair, unconfirmed.
-- **Open:** a 403 "There is a problem" page (6174 bytes, student site).
+- **`cell_click(s) answered 403; CSRFToken refresh N/3: token changed /
+  unchanged`** → the 403 path; whether the token changed and whether the
+  re-click landed is the evidence the open question below needs
+  `[2026-11-14]`.
+- **Open:** a 403 "There is a problem" page (6174 bytes, student site) — on
+  submits since 10-09, on every cell_click on 11-14; cause unknown.
   Every `unexpected`/`occupied` line logs `message=` (text after the last
   "Make Booking"); read it before assuming what a page means `[2026-09-17]`
   `[2026-10-15]`.

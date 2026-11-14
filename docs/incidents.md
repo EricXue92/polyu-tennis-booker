@@ -9,6 +9,49 @@ Entry format: **what happened** (with log evidence) → **cause** → **rule**.
 
 ---
 
+## 2026-11-14 — student: every cell_click timed out, then 403; no submit sent
+
+Run 43527592500, target Sat 2026-11-21, staff + student. Staff
+(`starspossfbns`) was healthy — warmup 0.8s, 4/4 pre-clicks ACCEPTED in
+~190ms, 18:30 TN01 booked. Student (`starspossfbstud`) never reached submit:
+
+| time (HKT)      | student                                                    |
+|-----------------|------------------------------------------------------------|
+| 08:29:58.040    | warmup (6 GETs) starts                                     |
+| 08:29:59.5      | 6 pre-clicks fired, one warmup GET still in flight         |
+| 08:30:00.628    | warmup complete — 2.6s (staff 0.8s; usual ~0.9s)           |
+| 08:30:05.810    | all 6 pre-clicks `ReadTimeout` (6.3s) → re-click round     |
+| 08:30:09.9–10.6 | 4 re-clicks answer **403** after 4.1–4.8s → ERROR_FATAL    |
+| 08:30:12.298    | the other 2 `ReadTimeout` (6.5s) → retry (attempt 2)       |
+| 08:30:12.449    | both answer 403 in **149ms**                               |
+| 08:30:13.772    | records GET works; `no candidate reached submit; exiting 1`|
+
+The 403 is the 6174-byte "POSS … There is a problem. Please click below link
+to try again." page, `message=''`.
+
+**Cause.** (1) The student site was slow from 08:29:58 to at least 08:30:06;
+same family as 2026-09-20, and the timeout retry did fire. (2) The re-clicks
+were answered 403, which `_classify_http_error` makes ERROR_FATAL, and only
+ERROR_TRANSIENT was retried — so the run quit after 13s of a 45s window.
+(3) Why PolyU said 403 is **not established**. What the log does show: the
+last two 403s took 149ms, so it was not load shedding but a deterministic
+refusal of that session's POST; and the Cancel Booking GET one second later
+returned the records, so the login was alive. Suspects: the CSRFToken had
+gone stale, or the server refuses a POST while the six clicks we abandoned on
+timeout are still queued on the session. Earlier 403s (10-09, 10-14, 11-06,
+11-13) were all on _submits_ after 9–16s, with other candidates booking
+normally; this is the first on a cell_click and the first to cost the day.
+
+**Rule:** a cell-click round with nothing ACCEPTED re-clicks its 403
+candidates after `PolyUHttpClient.refresh_csrf_token()` (GET make_book.do,
+re-parse the token), at most `CELL_403_REFRESH_MAX` (3) times inside the
+existing retry window; other ERROR_FATALs stay final. This is a probe as much
+as a fix: the next occurrence logs `csrf refresh: token CHANGED / unchanged`
+and whether the re-click then lands. If the token is unchanged and the
+re-click still 403s, the stale-token theory is dead — look at the
+abandoned-request theory next (e.g. a longer first-round timeout on the
+student site) rather than raising the cap.
+
 ## 2026-11-12 — three days lost to `ubuntu-latest`; pre-click stall on the 10-candidate ladder
 
 Two unrelated findings from one review of the runs since 2026-10-25.
