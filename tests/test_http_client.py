@@ -1209,3 +1209,94 @@ async def test_booking_records_returns_none_when_page_is_not_served():
         assert await client.booking_records() is None
     finally:
         await client.aclose()
+
+
+_MAKE_BOOK_URL = "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book.do"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_cell_click_reports_http_status_on_403():
+    from src.http_client import PolyUHttpClient, CellOutcome
+
+    respx.post(_MAKE_BOOK_URL).mock(return_value=Response(403, text="There is a problem."))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        cr = await client.cell_click(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert cr.outcome is CellOutcome.ERROR_FATAL
+    assert cr.http_status == 403
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_refresh_csrf_token_adopts_the_new_token(caplog):
+    from src.http_client import PolyUHttpClient
+
+    new = "11111111-2222-3333-4444-555555555555"
+    respx.get(_MAKE_BOOK_URL).mock(
+        return_value=Response(200, text=f"<script>x('a.do?CSRFToken={new}')</script>")
+    )
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="aaaaaaaa-0000", fb_user_id="1")
+    try:
+        with caplog.at_level("WARNING"):
+            changed = await client.refresh_csrf_token()
+    finally:
+        await client.aclose()
+    assert changed is True
+    assert client.csrf_token == new
+    assert "CHANGED" in caplog.text
+    # Only a prefix of either token is logged.
+    assert new not in caplog.text
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_refresh_csrf_token_reports_unchanged_token():
+    from src.http_client import PolyUHttpClient
+
+    tok = "11111111-2222-3333-4444-555555555555"
+    respx.get(_MAKE_BOOK_URL).mock(
+        return_value=Response(200, text=f"url?CSRFToken={tok}")
+    )
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token=tok, fb_user_id="1")
+    try:
+        assert await client.refresh_csrf_token() is False
+    finally:
+        await client.aclose()
+    assert client.csrf_token == tok
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize("response", [
+    Response(403, text="There is a problem."),
+    Response(200, text="<html>login page, no token</html>"),
+    Response(302, headers={"location": "/possns/loginhome.do"}),
+])
+async def test_refresh_csrf_token_keeps_old_token_when_page_is_unusable(response):
+    from src.http_client import PolyUHttpClient
+
+    respx.get(_MAKE_BOOK_URL).mock(return_value=response)
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="old", fb_user_id="1")
+    try:
+        assert await client.refresh_csrf_token() is None
+    finally:
+        await client.aclose()
+    assert client.csrf_token == "old"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_refresh_csrf_token_survives_transport_error():
+    import httpx
+    from src.http_client import PolyUHttpClient
+
+    respx.get(_MAKE_BOOK_URL).mock(side_effect=httpx.ReadTimeout("slow"))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="old", fb_user_id="1")
+    try:
+        assert await client.refresh_csrf_token() is None
+    finally:
+        await client.aclose()
+    assert client.csrf_token == "old"

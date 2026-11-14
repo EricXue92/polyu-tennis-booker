@@ -28,6 +28,10 @@ from src.config import TENNIS_FACILITIES
 from src.http_client import AvailableSlot, BookingResult, CellClickResult, CellOutcome
 
 
+# Scripted cell_click outcome: PolyU's 403 "There is a problem" page.
+_FORBIDDEN = "403"
+
+
 class _FakeClient:
     """Scripted client: per-candidate cell_click outcome + per-candidate submit result.
 
@@ -59,6 +63,13 @@ class _FakeClient:
         self.submit_calls = []
         self.submit_call_times: list[float] = []
         self.records_calls = 0
+        self.refresh_calls = 0
+        # What refresh_csrf_token reports: True changed, False same, None failed.
+        self.refresh_result: bool | None = True
+
+    async def refresh_csrf_token(self, *, timeout=None):
+        self.refresh_calls += 1
+        return self.refresh_result
 
     async def booking_records(self):
         self.records_calls += 1
@@ -76,6 +87,11 @@ class _FakeClient:
         if isinstance(outcome, list):
             # Scripted per-attempt outcomes; the last one repeats forever.
             outcome = outcome.pop(0) if len(outcome) > 1 else outcome[0]
+        if outcome == _FORBIDDEN:
+            return CellClickResult(
+                slot=slot, outcome=CellOutcome.ERROR_FATAL, latency_ms=10,
+                http_status=403,
+            )
         return CellClickResult(slot=slot, outcome=outcome, latency_ms=10)
 
     async def submit(self, slot):
@@ -939,3 +955,95 @@ async def test_dry_run_reads_records_but_never_clicks():
     assert outcome.rc == 0 and outcome.slot is None
     assert client.cell_click_calls == [] and client.submit_calls == []
     assert client.records_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cell_403_refreshes_csrf_token_and_reclicks():
+    # 2026-11-14: every student cell_click answered 403 "There is a problem"
+    # (the last one in 149ms) while a GET on the same session still worked,
+    # and the run quit at 08:30:13 with 32s of retry window unused. A round of
+    # 403s must re-read the CSRFToken and click again.
+    from src.http_booker import CELL_RETRY_TIMEOUT_SECONDS, book_via_http
+
+    cells = {k: [_FORBIDDEN, CellOutcome.ACCEPTED]
+             for k in _all_cell(CellOutcome.ACCEPTED)}
+    client = _FakeClient(
+        cell_click_outcomes=cells,
+        submit_results={**_all_submit(BookingResult.OCCUPIED),
+                        (18, _FACILITY_IDS[0]): BookingResult.SUCCESS},
+    )
+    rc = await book_via_http(
+        client, date(2026, 6, 10), _PRIORITY, dry_run=False, log=_LOG,
+        cell_retry_min_round_s=0.0,
+    )
+    assert rc == 0
+    assert client.refresh_calls == 1
+    assert client.cell_click_timeouts == [None] * 4 + [CELL_RETRY_TIMEOUT_SECONDS] * 4
+
+
+@pytest.mark.asyncio
+async def test_cell_403_token_refresh_is_capped():
+    # A 403 answers in ~150ms, so without a cap a dead session would be
+    # hammered for the whole retry window.
+    from src.http_booker import CELL_403_REFRESH_MAX, book_via_http
+
+    client = _FakeClient(cell_click_outcomes=_all_cell(_FORBIDDEN))
+    rc = await book_via_http(
+        client, date(2026, 6, 10), _PRIORITY, dry_run=False, log=_LOG,
+        cell_retry_min_round_s=0.0,
+    )
+    assert rc == 1
+    assert client.refresh_calls == CELL_403_REFRESH_MAX
+    assert len(client.cell_click_calls) == 4 * (1 + CELL_403_REFRESH_MAX)
+    assert client.submit_calls == []
+
+
+@pytest.mark.asyncio
+async def test_cell_403_is_reclicked_even_when_token_refresh_fails():
+    from src.http_booker import book_via_http
+
+    cells = {k: [_FORBIDDEN, CellOutcome.ACCEPTED]
+             for k in _all_cell(CellOutcome.ACCEPTED)}
+    client = _FakeClient(
+        cell_click_outcomes=cells,
+        submit_results={**_all_submit(BookingResult.OCCUPIED),
+                        (18, _FACILITY_IDS[0]): BookingResult.SUCCESS},
+    )
+    client.refresh_result = None
+    rc = await book_via_http(
+        client, date(2026, 6, 10), _PRIORITY, dry_run=False, log=_LOG,
+        cell_retry_min_round_s=0.0,
+    )
+    assert rc == 0
+
+
+@pytest.mark.asyncio
+async def test_cell_fatal_other_than_403_is_not_retried():
+    from src.http_booker import book_via_http
+
+    client = _FakeClient(cell_click_outcomes=_all_cell(CellOutcome.ERROR_FATAL))
+    rc = await book_via_http(
+        client, date(2026, 6, 10), _PRIORITY, dry_run=False, log=_LOG,
+        cell_retry_min_round_s=0.0,
+    )
+    assert rc == 1
+    assert client.refresh_calls == 0
+    assert len(client.cell_click_calls) == 4
+
+
+@pytest.mark.asyncio
+async def test_no_token_refresh_once_any_candidate_is_accepted():
+    from src.http_booker import book_via_http
+
+    cells = _all_cell(_FORBIDDEN)
+    cells[(19, _FACILITY_IDS[0])] = CellOutcome.ACCEPTED
+    client = _FakeClient(
+        cell_click_outcomes=cells,
+        submit_results={(19, _FACILITY_IDS[0]): BookingResult.SUCCESS},
+    )
+    rc = await book_via_http(
+        client, date(2026, 6, 10), _PRIORITY, dry_run=False, log=_LOG,
+    )
+    assert rc == 0
+    assert client.refresh_calls == 0
+    assert len(client.cell_click_calls) == 4

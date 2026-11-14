@@ -65,6 +65,10 @@ class CellClickResult:
     slot: "AvailableSlot"
     outcome: CellOutcome
     latency_ms: int
+    # HTTP status of the response, None when there was none (transport
+    # error, or a click dropped in flight). The orchestrator re-clicks a 403
+    # after refreshing the CSRFToken [2026-11-14].
+    http_status: int | None = None
 
 
 _DIAG_MARKERS = (
@@ -374,6 +378,58 @@ class PolyUHttpClient:
                 return -1
         return await asyncio.gather(*(_one() for _ in range(n)))
 
+    async def refresh_csrf_token(self, *, timeout: float | None = None) -> bool | None:
+        """Re-read the CSRFToken from make_book.do and adopt it.
+
+        Returns True if the token changed, False if PolyU still hands out the
+        one we hold, None if the page could not be fetched or carries no token
+        (the old token is kept). Never raises.
+
+        On 2026-11-14 every student cell_click answered 403 "There is a
+        problem" - one of them in 149ms - while a GET on the same session
+        worked a second later, so the session was alive and only the POST was
+        refused. A stale token is the suspect; the CHANGED / unchanged line
+        logged here is the evidence for or against it. Off the hot path: the
+        orchestrator calls this only when a cell-click round has nothing
+        ACCEPTED.
+        """
+        try:
+            resp = await self._http.get(
+                self.site.make_book_url,
+                timeout=(
+                    httpx.USE_CLIENT_DEFAULT if timeout is None
+                    else httpx.Timeout(timeout, connect=self._connect_timeout)
+                ),
+                headers={
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Referer": self.site.make_book_url,
+                },
+            )
+        except httpx.HTTPError as exc:
+            _LOG.warning("csrf refresh transport error: %r", exc)
+            return None
+        body = resp.text or ""
+        try:
+            if resp.status_code != 200:
+                raise HtmlParseError(f"status {resp.status_code}")
+            token = parse_csrf_token(body)
+        except HtmlParseError:
+            _LOG.warning(
+                "csrf refresh: no token (status=%d, location=%r, body_len=%d, "
+                "preview=%r); keeping the old one",
+                resp.status_code, resp.headers.get("location", ""), len(body),
+                _visible_text(body)[:_PREVIEW_CHARS],
+            )
+            return None
+        changed = token != self.csrf_token
+        _LOG.warning(
+            "csrf refresh: token %s (%s... -> %s...)",
+            "CHANGED" if changed else "unchanged",
+            self.csrf_token[:8], token[:8],
+        )
+        self.csrf_token = token
+        return changed
+
     async def page_text(self, url: str, *, timeout: float | None = None) -> str | None:
         """GET `url` and return its visible text; None on transport error or
         non-200. Off the hot path (booking verification, diagnostics)."""
@@ -587,7 +643,10 @@ class PolyUHttpClient:
                 _page_message(body),
                 outcome.name,
             )
-        return CellClickResult(slot=slot, outcome=outcome, latency_ms=latency_ms)
+        return CellClickResult(
+            slot=slot, outcome=outcome, latency_ms=latency_ms,
+            http_status=resp.status_code,
+        )
 
     async def submit(self, slot: AvailableSlot) -> BookingResult:
         """POST make_book_submit.do to commit a slot whose cell_click was ACCEPTED.

@@ -43,6 +43,11 @@ one is ACCEPTED, none is transient any more, or the window closes. On
 the 6s ReadTimeout, and the run quit at 08:30:07 - while 19:30 stayed free
 long enough for the owner to book it by hand. A timeout says nothing about
 the slot, so giving up on it is never right.
+
+403 on a cell-click is retried too, after re-reading the CSRFToken, at most
+CELL_403_REFRESH_MAX times: on 2026-11-14 the student site answered every
+re-click with its 403 "There is a problem" page while the session was still
+alive, and the run quit at 08:30:13 without a single submit.
 """
 from __future__ import annotations
 
@@ -79,6 +84,10 @@ SUBMIT_STAGGER_SECONDS = 2.5
 CELL_RETRY_WINDOW_SECONDS = 45.0
 CELL_RETRY_TIMEOUT_SECONDS = 15.0
 CELL_RETRY_MIN_ROUND_SECONDS = 1.0
+# How many retry rounds may re-click candidates that answered 403, each after
+# a CSRFToken refresh. Capped because a 403 answers in ~150ms: a session that
+# is really dead must not be hammered for the whole window.
+CELL_403_REFRESH_MAX = 3
 
 
 # Awaited once between the cell-click round and the first submit; the
@@ -97,6 +106,9 @@ class _ClientLike(Protocol):
         self, slot: AvailableSlot, *, timeout: float | None = None,
     ) -> CellClickResult: ...
     async def submit(self, slot: AvailableSlot) -> BookingResult: ...
+    async def refresh_csrf_token(
+        self, *, timeout: float | None = None,
+    ) -> bool | None: ...
     async def booking_records(self) -> list[AvailableSlot] | None: ...
 
 
@@ -315,22 +327,45 @@ async def book_via_http_outcome(
     loop = asyncio.get_running_loop()
     retry_deadline = loop.time() + cell_retry_window_s
     attempt = 1
+    refreshes = 0
+
+    def _is_403(cr: CellClickResult) -> bool:
+        return cr.outcome is CellOutcome.ERROR_FATAL and cr.http_status == 403
+
     while loop.time() < retry_deadline:
         if any(cr.outcome is CellOutcome.ACCEPTED for cr in cell_results):
             break
+        # A 403 is re-clicked only after a token refresh, and only while the
+        # refresh budget lasts; other ERROR_FATALs stay final.
+        refresh = refreshes < CELL_403_REFRESH_MAX and any(
+            _is_403(cr) for cr in cell_results
+        )
         retry_ranks = [
             rank for rank, cr in enumerate(cell_results)
             if cr.outcome is CellOutcome.ERROR_TRANSIENT
+            or (refresh and _is_403(cr))
         ]
         if not retry_ranks:
             break
         attempt += 1
+        round_start = loop.time()
+        if refresh:
+            refreshes += 1
+            n_403 = sum(_is_403(cr) for cr in cell_results)
+            changed = await client.refresh_csrf_token(
+                timeout=CELL_RETRY_TIMEOUT_SECONDS,
+            )
+            log.warning(
+                "%d cell_click(s) answered 403; CSRFToken refresh %d/%d: %s",
+                n_403, refreshes, CELL_403_REFRESH_MAX,
+                {True: "token changed", False: "token unchanged",
+                 None: "failed"}[changed],
+            )
         log.warning(
-            "no cell_click ACCEPTED, %d ERROR_TRANSIENT; retrying them "
+            "no cell_click ACCEPTED, %d ERROR_TRANSIENT/403; retrying them "
             "(attempt %d, timeout=%.0fs)",
             len(retry_ranks), attempt, CELL_RETRY_TIMEOUT_SECONDS,
         )
-        round_start = loop.time()
         retried = await asyncio.gather(*(
             client.cell_click(candidates[rank], timeout=CELL_RETRY_TIMEOUT_SECONDS)
             for rank in retry_ranks
