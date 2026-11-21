@@ -8,7 +8,9 @@ book_via_http:
        - Fires all submits in the group concurrently via asyncio.gather.
        - Any SUCCESS wins (lower-rank preferred if multiple); return 0.
        - No SUCCESS + any ERROR_FATAL -> abort; return 1.
-       - No SUCCESS + only OCCUPIED/TRANSIENT -> advance to next group.
+       - No SUCCESS + only OCCUPIED/TRANSIENT/FORBIDDEN -> advance to next group.
+       - A TRANSIENT / FORBIDDEN (403) submit is re-clicked and re-submitted
+         (see the "Submit retry" tests).
   5. If 0 ACCEPTED: re-fire the ERROR_TRANSIENT candidates (longer timeout)
      until one is ACCEPTED, none is transient, or the retry window closes;
      still 0 ACCEPTED -> return 1 (no submit calls).
@@ -37,7 +39,8 @@ class _FakeClient:
 
     cell_click_outcomes / submit_results are dicts keyed by (start_hour, facility_id)
     so tests can express intent without depending on candidate construction order.
-    A cell_click outcome may be a list to script successive attempts (retry rounds).
+    A cell_click outcome or a submit result may be a list to script successive
+    attempts (retry rounds).
     submit_sleeps optionally injects per-candidate latency to verify intra-group
     parallelism / inter-group serialization.
     """
@@ -66,9 +69,13 @@ class _FakeClient:
         self.refresh_calls = 0
         # What refresh_csrf_token reports: True changed, False same, None failed.
         self.refresh_result: bool | None = True
+        # How long refresh_csrf_token takes (a real one is a GET round trip).
+        self.refresh_sleep_s = 0.0
 
     async def refresh_csrf_token(self, *, timeout=None):
         self.refresh_calls += 1
+        if self.refresh_sleep_s:
+            await asyncio.sleep(self.refresh_sleep_s)
         return self.refresh_result
 
     async def booking_records(self):
@@ -99,9 +106,16 @@ class _FakeClient:
         self.submit_call_times.append(time.perf_counter())
         key = (slot.start_dt.hour, slot.facility_id)
         delay = self._sub_sleeps.get(key, 0.0)
+        if isinstance(delay, list):
+            # Scripted per-attempt latency; the last one repeats forever.
+            delay = delay.pop(0) if len(delay) > 1 else delay[0]
         if delay:
             await asyncio.sleep(delay)
-        return self._sub[key]
+        result = self._sub[key]
+        if isinstance(result, list):
+            # Scripted per-attempt results; the last one repeats forever.
+            result = result.pop(0) if len(result) > 1 else result[0]
+        return result
 
 
 _LOG = logging.getLogger("test")
@@ -849,9 +863,14 @@ async def test_records_show_booking_after_submit_timeouts():
         submit_results=_all_submit(BookingResult.ERROR_TRANSIENT),
         records=[_record(target, 18, _FACILITY_IDS[1])],
     )
-    outcome = await book_via_http_outcome(client, target, _PRIORITY, dry_run=False, log=_LOG)
+    # A 45s ReadTimeout lands after the submit retry window has closed.
+    outcome = await book_via_http_outcome(
+        client, target, _PRIORITY, dry_run=False, log=_LOG,
+        submit_retry_window_s=0.0,
+    )
     assert outcome.rc == 0
     assert outcome.slot.facility_id == _FACILITY_IDS[1]
+    assert len(client.submit_calls) == 4  # nothing was re-submitted
 
 
 @pytest.mark.asyncio
@@ -1047,3 +1066,374 @@ async def test_no_token_refresh_once_any_candidate_is_accepted():
     assert rc == 0
     assert client.refresh_calls == 0
     assert len(client.cell_click_calls) == 4
+
+
+# --- Submit retry: 403 (token refresh) and 5xx / transport errors -----------
+#
+# 2026-11-21: PolyU fell over at 08:30. Staff's four submits answered 500
+# "We'll be back soon!" (x2) and 403 "There is a problem" (x2) after 10-15s;
+# student's two 17:30 submits answered 403 in 0.37s and, because 403 was an
+# ERROR_FATAL, the 19:30 and 21:30 groups were never launched. Neither answer
+# is a verdict on the slot, so both are retried: re-click, then re-submit
+# (after a CSRFToken refresh for a 403).
+
+_ONE_SLOT = [(dtime(18, 30), dtime(19, 30))]
+_F0, _F1 = _FACILITY_IDS
+
+
+def _calls_for(calls, hour, facility_id):
+    return [s for s in calls if (s.start_dt.hour, s.facility_id) == (hour, facility_id)]
+
+
+@pytest.mark.asyncio
+async def test_submit_403_refreshes_token_reclicks_and_resubmits():
+    from src.http_booker import CELL_RETRY_TIMEOUT_SECONDS, book_via_http
+
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results={
+            (18, _F0): [BookingResult.ERROR_FORBIDDEN, BookingResult.SUCCESS],
+            (18, _F1): BookingResult.OCCUPIED,
+        },
+    )
+    rc = await book_via_http(
+        client, date(2026, 11, 28), _ONE_SLOT, dry_run=False, log=_LOG,
+        submit_retry_gap_s=0.0,
+    )
+    assert rc == 0
+    assert client.refresh_calls == 1
+    assert len(_calls_for(client.submit_calls, 18, _F0)) == 2
+    assert len(_calls_for(client.submit_calls, 18, _F1)) == 1
+    # Two first-round clicks, then one re-click of the refused candidate on
+    # the long retry budget.
+    assert client.cell_click_timeouts == [None, None, CELL_RETRY_TIMEOUT_SECONDS]
+    assert client.cell_click_calls[-1].facility_id == _F0
+
+
+@pytest.mark.asyncio
+async def test_submit_5xx_is_reclicked_and_resubmitted_without_token_refresh():
+    from src.http_booker import book_via_http
+
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results={
+            (18, _F0): [BookingResult.ERROR_TRANSIENT, BookingResult.SUCCESS],
+            (18, _F1): BookingResult.OCCUPIED,
+        },
+    )
+    rc = await book_via_http(
+        client, date(2026, 11, 28), _ONE_SLOT, dry_run=False, log=_LOG,
+        submit_retry_gap_s=0.0,
+    )
+    assert rc == 0
+    assert client.refresh_calls == 0
+    assert len(_calls_for(client.submit_calls, 18, _F0)) == 2
+    assert len(client.cell_click_calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_submit_403_does_not_stop_later_groups():
+    # The student account on 2026-11-21: 403 on the first group must not be
+    # read as "auth dead / booked behind an error page".
+    from src.http_booker import book_via_http_outcome
+
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results={
+            (18, _F0): BookingResult.ERROR_FORBIDDEN,
+            (18, _F1): BookingResult.ERROR_FORBIDDEN,
+            (19, _F0): BookingResult.SUCCESS,
+            (19, _F1): BookingResult.OCCUPIED,
+        },
+    )
+    outcome = await book_via_http_outcome(
+        client, date(2026, 11, 28), _PRIORITY, dry_run=False, log=_LOG,
+        submit_retry_gap_s=0.0, stagger_s=0.05,
+    )
+    assert outcome.rc == 0
+    assert (outcome.slot.start_dt.hour, outcome.slot.facility_id) == (19, _F0)
+
+
+@pytest.mark.asyncio
+async def test_submit_retry_and_token_refresh_are_capped():
+    from src.http_booker import (
+        SUBMIT_403_REFRESH_MAX, SUBMIT_RETRY_MAX, book_via_http,
+    )
+
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results=_all_submit(BookingResult.ERROR_FORBIDDEN),
+    )
+    rc = await book_via_http(
+        client, date(2026, 11, 28), _ONE_SLOT, dry_run=False, log=_LOG,
+        submit_retry_gap_s=0.0,
+    )
+    assert rc == 1
+    assert len(client.submit_calls) == 2 * (1 + SUBMIT_RETRY_MAX)
+    assert 1 <= client.refresh_calls <= SUBMIT_403_REFRESH_MAX
+    assert client.records_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_submit_403s_share_one_token_refresh():
+    # Both candidates of a group were sent with the same token; the second
+    # 403 must not refresh again once the first one already has.
+    from src.http_booker import book_via_http
+
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results={
+            (18, _F0): [BookingResult.ERROR_FORBIDDEN, BookingResult.OCCUPIED],
+            (18, _F1): [BookingResult.ERROR_FORBIDDEN, BookingResult.OCCUPIED],
+        },
+    )
+    rc = await book_via_http(
+        client, date(2026, 11, 28), _ONE_SLOT, dry_run=False, log=_LOG,
+        submit_retry_gap_s=0.0,
+    )
+    assert rc == 1
+    assert client.refresh_calls == 1
+    assert len(client.submit_calls) == 4
+
+
+@pytest.mark.asyncio
+async def test_submit_is_not_retried_once_the_window_has_closed():
+    from src.http_booker import book_via_http
+
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results=_all_submit(BookingResult.ERROR_FORBIDDEN),
+    )
+    rc = await book_via_http(
+        client, date(2026, 11, 28), _ONE_SLOT, dry_run=False, log=_LOG,
+        submit_retry_gap_s=0.0, submit_retry_window_s=0.0,
+    )
+    assert rc == 1
+    assert len(client.submit_calls) == 2
+    assert client.refresh_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_submit_retry_ends_when_the_reclick_says_occupied():
+    from src.http_booker import book_via_http
+
+    cells = _all_cell(CellOutcome.ACCEPTED)
+    cells[(18, _F0)] = [CellOutcome.ACCEPTED, CellOutcome.OCCUPIED]
+    client = _FakeClient(
+        cell_click_outcomes=cells,
+        submit_results={
+            (18, _F0): BookingResult.ERROR_TRANSIENT,
+            (18, _F1): BookingResult.OCCUPIED,
+        },
+    )
+    rc = await book_via_http(
+        client, date(2026, 11, 28), _ONE_SLOT, dry_run=False, log=_LOG,
+        submit_retry_gap_s=0.0,
+    )
+    assert rc == 1
+    assert len(_calls_for(client.submit_calls, 18, _F0)) == 1
+
+
+@pytest.mark.asyncio
+async def test_submit_is_not_retried_after_a_sibling_fatal():
+    # A non-403 ERROR_FATAL is the "Failed to reserve facility" / quota page,
+    # which has meant a booking went through: stop and let the records decide.
+    from src.http_booker import book_via_http
+
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results={
+            (18, _F0): BookingResult.ERROR_TRANSIENT,
+            (18, _F1): BookingResult.ERROR_FATAL,
+        },
+    )
+    rc = await book_via_http(
+        client, date(2026, 11, 28), _ONE_SLOT, dry_run=False, log=_LOG,
+        submit_retry_gap_s=0.0,
+    )
+    assert rc == 1
+    assert len(client.submit_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_submit_retry_attempts_are_paced():
+    # A 403 answers in ~150ms; a candidate's attempts must start at least
+    # submit_retry_gap_s apart so a dead session is not hammered.
+    from src.http_booker import book_via_http
+
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results={
+            (18, _F0): [BookingResult.ERROR_FORBIDDEN, BookingResult.OCCUPIED],
+            (18, _F1): BookingResult.OCCUPIED,
+        },
+    )
+    await book_via_http(
+        client, date(2026, 11, 28), _ONE_SLOT, dry_run=False, log=_LOG,
+        submit_retry_gap_s=0.2,
+    )
+    first, _sibling, second = client.submit_call_times
+    assert second - first >= 0.19
+
+
+@pytest.mark.asyncio
+async def test_retrying_group_does_not_delay_the_next_groups_first_submit():
+    # Arrival order decides the court, so a group that is busy retrying must
+    # count as "answered" for the stagger: 19:30 leaves as soon as 18:30's
+    # first submits have answered, exactly as it did before retries existed.
+    from src.http_booker import book_via_http
+
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results={
+            (18, _F0): BookingResult.ERROR_TRANSIENT,
+            (18, _F1): BookingResult.ERROR_TRANSIENT,
+            (19, _F0): BookingResult.OCCUPIED,
+            (19, _F1): BookingResult.OCCUPIED,
+        },
+    )
+    await book_via_http(
+        client, date(2026, 11, 28), _PRIORITY, dry_run=False, log=_LOG,
+        submit_retry_gap_s=0.4, stagger_s=2.0,
+    )
+    first_18 = client.submit_call_times[0]
+    first_19 = min(
+        t for s, t in zip(client.submit_calls, client.submit_call_times)
+        if s.start_dt.hour == 19
+    )
+    assert first_19 - first_18 < 0.2
+
+
+@pytest.mark.asyncio
+async def test_success_stops_the_ladder_while_a_sibling_is_still_retrying():
+    # 18:30 F1 answers 500 at once and its re-submit then hangs; F0 books at
+    # 0.1s. The group has not finished, but nothing more may be launched.
+    from src.http_booker import book_via_http
+
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results={
+            **_all_submit(BookingResult.OCCUPIED),
+            (18, _F0): BookingResult.SUCCESS,
+            (18, _F1): [BookingResult.ERROR_TRANSIENT, BookingResult.OCCUPIED],
+        },
+        submit_sleeps={(18, _F0): 0.1, (18, _F1): [0.0, 0.8]},
+    )
+    rc = await book_via_http(
+        client, date(2026, 11, 28), _PRIORITY, dry_run=False, log=_LOG,
+        submit_retry_gap_s=0.0, stagger_s=0.3,
+    )
+    assert rc == 0
+    assert {s.start_dt.hour for s in client.submit_calls} == {18}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_submit_403s_wait_for_one_slow_token_refresh():
+    # With a real (slow) refresh the second 403 queues on the lock, then
+    # finds the token already refreshed and does not refresh again.
+    from src.http_booker import book_via_http
+
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results={
+            (18, _F0): [BookingResult.ERROR_FORBIDDEN, BookingResult.OCCUPIED],
+            (18, _F1): [BookingResult.ERROR_FORBIDDEN, BookingResult.OCCUPIED],
+        },
+        submit_sleeps={(18, _F0): [0.02, 0.0], (18, _F1): [0.03, 0.0]},
+    )
+    client.refresh_sleep_s = 0.1
+    await book_via_http(
+        client, date(2026, 11, 28), _ONE_SLOT, dry_run=False, log=_LOG,
+        submit_retry_gap_s=0.0,
+    )
+    assert client.refresh_calls == 1
+    assert len(client.submit_calls) == 4
+
+
+@pytest.mark.asyncio
+async def test_failed_token_refresh_is_tried_again_by_the_sibling():
+    # A refresh that could not read a token must not count as "refreshed".
+    from src.http_booker import SUBMIT_403_REFRESH_MAX, book_via_http
+
+    client = _FakeClient(
+        cell_click_outcomes=_all_cell(CellOutcome.ACCEPTED),
+        submit_results={
+            (18, _F0): [BookingResult.ERROR_FORBIDDEN, BookingResult.OCCUPIED],
+            (18, _F1): [BookingResult.ERROR_FORBIDDEN, BookingResult.OCCUPIED],
+        },
+    )
+    client.refresh_result = None
+    await book_via_http(
+        client, date(2026, 11, 28), _ONE_SLOT, dry_run=False, log=_LOG,
+        submit_retry_gap_s=0.0,
+    )
+    assert client.refresh_calls == 2 <= SUBMIT_403_REFRESH_MAX
+
+
+@pytest.mark.asyncio
+async def test_reclick_403_during_submit_retry_refreshes_and_tries_again():
+    from src.http_booker import book_via_http
+
+    cells = _all_cell(CellOutcome.ACCEPTED)
+    cells[(18, _F0)] = [CellOutcome.ACCEPTED, _FORBIDDEN, CellOutcome.ACCEPTED]
+    client = _FakeClient(
+        cell_click_outcomes=cells,
+        submit_results={
+            (18, _F0): [BookingResult.ERROR_TRANSIENT, BookingResult.SUCCESS],
+            (18, _F1): BookingResult.OCCUPIED,
+        },
+    )
+    rc = await book_via_http(
+        client, date(2026, 11, 28), _ONE_SLOT, dry_run=False, log=_LOG,
+        submit_retry_gap_s=0.0,
+    )
+    assert rc == 0
+    assert client.refresh_calls == 1
+    assert len(_calls_for(client.cell_click_calls, 18, _F0)) == 3
+    assert len(_calls_for(client.submit_calls, 18, _F0)) == 2
+
+
+@pytest.mark.asyncio
+async def test_reclick_timeout_during_submit_retry_is_tried_again():
+    from src.http_booker import book_via_http
+
+    cells = _all_cell(CellOutcome.ACCEPTED)
+    cells[(18, _F0)] = [
+        CellOutcome.ACCEPTED, CellOutcome.ERROR_TRANSIENT, CellOutcome.ACCEPTED,
+    ]
+    client = _FakeClient(
+        cell_click_outcomes=cells,
+        submit_results={
+            (18, _F0): [BookingResult.ERROR_TRANSIENT, BookingResult.SUCCESS],
+            (18, _F1): BookingResult.OCCUPIED,
+        },
+    )
+    rc = await book_via_http(
+        client, date(2026, 11, 28), _ONE_SLOT, dry_run=False, log=_LOG,
+        submit_retry_gap_s=0.0,
+    )
+    assert rc == 0
+    assert client.refresh_calls == 0
+    assert len(_calls_for(client.submit_calls, 18, _F0)) == 2
+
+
+@pytest.mark.asyncio
+async def test_submit_retry_ends_when_the_reclick_is_fatal():
+    from src.http_booker import book_via_http
+
+    cells = _all_cell(CellOutcome.ACCEPTED)
+    cells[(18, _F0)] = [CellOutcome.ACCEPTED, CellOutcome.ERROR_FATAL]
+    client = _FakeClient(
+        cell_click_outcomes=cells,
+        submit_results={
+            (18, _F0): BookingResult.ERROR_TRANSIENT,
+            (18, _F1): BookingResult.OCCUPIED,
+        },
+    )
+    rc = await book_via_http(
+        client, date(2026, 11, 28), _ONE_SLOT, dry_run=False, log=_LOG,
+        submit_retry_gap_s=0.0,
+    )
+    assert rc == 1
+    assert len(_calls_for(client.cell_click_calls, 18, _F0)) == 2
+    assert len(_calls_for(client.submit_calls, 18, _F0)) == 1

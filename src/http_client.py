@@ -48,6 +48,10 @@ class BookingResult(enum.Enum):
     # Auth lost, 4xx, or unrecognised response shape — abort the run; remaining
     # candidates would hit the same wall.
     ERROR_FATAL = enum.auto()
+    # submit() only: HTTP 403, PolyU's "There is a problem" page. It refuses
+    # the POST, not the slot, and the session is still alive — the
+    # orchestrator re-submits after a CSRFToken refresh [2026-11-21].
+    ERROR_FORBIDDEN = enum.auto()
 
 
 class CellOutcome(enum.Enum):
@@ -389,9 +393,10 @@ class PolyUHttpClient:
         problem" - one of them in 149ms - while a GET on the same session
         worked a second later, so the session was alive and only the POST was
         refused. A stale token is the suspect; the CHANGED / unchanged line
-        logged here is the evidence for or against it. Off the hot path: the
-        orchestrator calls this only when a cell-click round has nothing
-        ACCEPTED.
+        logged here is the evidence for or against it. Never ahead of a first
+        submit: the orchestrator calls this only when a cell-click round has
+        nothing ACCEPTED, or after a submit has answered 403 [2026-11-21] -
+        other groups' submits may be in flight at that point.
         """
         try:
             resp = await self._http.get(
@@ -657,8 +662,11 @@ class PolyUHttpClient:
                             Slot was grabbed between our cell_click and this POST,
                             or PolyU's quota check rejected us.
           ERROR_TRANSIENT - 5xx, network/timeout.
-          ERROR_FATAL     - 4xx or unrecognised shape; orchestrator should stop
-                            trying further submits (auth is presumed dead).
+          ERROR_FORBIDDEN - 403; the POST was refused, the slot is unknown.
+                            Retried by the orchestrator after a token refresh.
+          ERROR_FATAL     - other 4xx or unrecognised shape; orchestrator should
+                            stop trying further submits (auth is presumed dead,
+                            or the booking went through behind an error page).
 
         A.1 fix: OCCUPIED detection now matches 'make_book' broadly (covering
         both make_book.do and make_book_submit.do redirect targets) and uses a
@@ -743,7 +751,10 @@ class PolyUHttpClient:
                 _page_message(body),
             )
             return BookingResult.OCCUPIED
-        err = _classify_http_error(resp.status_code)
+        err = (
+            BookingResult.ERROR_FORBIDDEN if resp.status_code == 403
+            else _classify_http_error(resp.status_code)
+        )
         _LOG.warning(
             "submit unexpected (status=%d, location=%r, body_len=%d, "
             "preview=%r, markers=%s, context=%s, message=%r) -> %s",

@@ -165,9 +165,17 @@ Hot path:
   its siblings `[2026-06-18]`; serial groups lost 7 runs `[2026-08-19]`.
 - **The winner is chosen by rank, never by arrival order** — groups overlap,
   so a fast 19:30 answer must not beat a slower 18:30 one. Launching stops
-  early once a settled group holds a SUCCESS (don't burn the daily quota on a
-  fallback) or a FATAL with no SUCCESS (auth dead, or — since 2026-10 — the
-  booking went through behind an error page; the records decide).
+  early once any submit has answered SUCCESS (don't burn the daily quota on a
+  fallback) or a settled group holds a FATAL (auth dead, or — since 2026-10 —
+  the booking went through behind an error page; the records decide). A
+  group is "settled" when its **first** submits have all answered: one that is
+  busy retrying must never hold back the next group's launch. A submit 403 is
+  `ERROR_FORBIDDEN`, not FATAL, and never stops the ladder.
+- **A submit answered 403 / 5xx / transport error is re-clicked and
+  re-submitted** (403: after a CSRFToken refresh), per candidate, at most
+  `SUBMIT_RETRY_MAX` times inside `SUBMIT_RETRY_WINDOW_SECONDS`; it stops once
+  any submit of the account is SUCCESS or FATAL. First submits are untouched —
+  never move the retry ahead of them `[2026-11-21]`.
 - **Two timeout budgets** (`PolyUHttpClient(timeout=6.0,
 submit_timeout=45.0)`). `timeout` guards cell_click/warmup: 150–300ms warm,
   and gathered, so one hang stalls the whole submit phase (retry rounds get
@@ -184,6 +192,7 @@ submit_timeout=45.0)`). `timeout` guards cell_click/warmup: 150–300ms warm,
 - **Submit result is classified from one response — no waiter race.**
   Location `make_book_result.do` ⇒ SUCCESS; "occupied" (case-insensitive)
   in the body or any `make_book*` redirect ⇒ OCCUPIED `[2026-06-07]`;
+  403 ⇒ `ERROR_FORBIDDEN` (submit only);
   anything else ⇒ `ERROR_*`. Every `ERROR_*` from `cell_click`/`submit` logs status +
   Location + body_len + preview + markers + context, with `preview`/`context`
   built from the page's **visible text** (`_visible_text`, `_diag_context`),
@@ -251,8 +260,18 @@ Check latencies before suspecting the code:
   unchanged`** → the 403 path; whether the token changed and whether the
   re-click landed is the evidence the open question below needs
   `[2026-11-14]`.
-- **Open:** a 403 "There is a problem" page (6174 bytes, student site) — on
-  submits since 10-09, on every cell_click on 11-14; cause unknown.
+- **`submit … answered ERROR_FORBIDDEN / ERROR_TRANSIENT; retry N/2`** → the
+  submit retry; the `submit retry rank=…: cell=…` line and the final
+  `submit rank=…` line say whether it landed `[2026-11-21]`.
+- **500 "We'll be back soon!" (1992 bytes)** → PolyU's backend fell over;
+  expect 403s and cell-click timeouts in the same run `[2026-11-21]`.
+- **`Payment exceeds Balance Amount`** (42692 bytes, ERROR_FATAL) → the
+  account's balance is below the $15 fee; top it up, nothing to fix
+  `[2026-11-21]`.
+- **Open:** a 403 "There is a problem" page (6174 bytes student, 6120 staff)
+  — on submits since 10-09, on every cell_click on 11-14; cause unknown. It
+  comes with PolyU overload, and on 11-17 the token had changed server-side
+  (a session rebuilt after a failover?) `[2026-11-21]`.
   Every `unexpected`/`occupied` line logs `message=` (text after the last
   "Make Booking"); read it before assuming what a page means `[2026-09-17]`
   `[2026-10-15]`.
@@ -283,7 +302,7 @@ Check latencies before suspecting the code:
   insurance on contested evenings `[2026-09-16]`.
 - Trigger time: `TRIGGER_TIME_HKT` in `src/config.py`.
 - Days-ahead window: `DAYS_AHEAD` in `src/dates.py`.
-- Submit stagger / cell-click retry: `SUBMIT_STAGGER_SECONDS`, `CELL_RETRY_*`
+- Submit stagger / retries: `SUBMIT_STAGGER_SECONDS`, `SUBMIT_RETRY_*`, `CELL_RETRY_*`
   in `src/http_booker.py`.
 
 ## Weekday-specific adjustments

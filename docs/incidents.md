@@ -9,6 +9,82 @@ Entry format: **what happened** (with log evidence) → **cause** → **rule**.
 
 ---
 
+## 2026-11-21 — PolyU fell over at 08:30: submits answered 500 and 403 (4 lost runs in 5 days)
+
+Reviewed together: the runs of 11-17, 11-18, 11-20 and 11-21. The three
+PolyU-side failures share one picture — the student site (and on 11-21 the
+staff site too) stops answering around 08:29:58–08:30:15, then answers with
+error pages.
+
+**11-21, run 44837268001, target Sat 11-28, staff + student.**
+
+| time (HKT)   | staff (`starspossfbns`)                        | student (`starspossfbstud`)                          |
+|--------------|------------------------------------------------|------------------------------------------------------|
+| 08:29:58     | warmup, 2.8s (usual ~1s)                       | 6 warmup GETs, all fail (`-1`, done 08:30:04.9)      |
+| 08:30:00.307 | 4/4 pre-clicks ACCEPTED (570–800ms), submits out | pre-clicks in flight                               |
+| 08:30:05.879 |                                                | 6 pre-clicks `ReadTimeout` (6.4s) → re-click         |
+| 08:30:10.7–15.3 | each group: one **500** (1992 bytes), one **403** (6120 bytes) |                                    |
+| 08:30:12.631 |                                                | 5 `ReadTimeout` + one 500 → retry (attempt 2, 15s)   |
+| 08:30:17.461 |                                                | 5 ACCEPTED (4.0–4.8s), rank 4 answers 403            |
+| 08:30:17.826 |                                                | both 17:30 submits **403** (6174 bytes) in 0.37s     |
+| 08:30:18–19  | records: nothing on 11-28; exit 1              | `not launching further groups`; records: nothing; exit 1 |
+
+The 500 page reads "We'll be back soon! Sorry for the inconvenience. We're
+doing our best to get things back for you." — a backend that is down, not a
+busy one. The 403 is the "There is a problem" page of `[2026-11-14]`; the
+staff site's copy is 6120 bytes.
+
+**The other three days.**
+
+- **11-17** (run 43979882168, target Tue 11-24, student): 10 pre-clicks
+  `ReadTimeout`; the re-click round got 3× 403 + 7 timeouts; `csrf refresh:
+  token CHANGED (a462c678... -> 6895b7ae...)` at 08:30:16.9; the next round
+  was accepted and all 10 submits came back OCCUPIED (42726 bytes) at
+  08:30:18–26. The `[2026-11-14]` probe therefore answered: the token _had_
+  changed server-side. Not proof that the refresh is what made the re-click
+  land — the seven timed-out candidates were retried in the same round.
+- **11-18** (run 44199977569, target Wed 11-25, student + student2): 9/10 and
+  5/6 pre-clicks `ReadTimeout`; one submit each, 500 and OCCUPIED.
+- **11-20** (run 44638216904, target Fri 11-27, student + student2): PolyU
+  was healthy for `student` (10/10 pre-clicks at 08:30:00.001), and four
+  courts that were still free were refused with **"Payment exceeds Balance
+  Amount … Fee: $15.00"** (42692 bytes, ERROR_FATAL). The same sentence first
+  appeared on 11-19 on the surplus commits after that day's booking, i.e. the
+  balance dropped below one fee then. Not a code problem; the owner confirmed
+  on 11-21 that the balance is fine again. `student2` got 403 on all six
+  submits after 8–12s. (`student2` was removed on 11-21, PR #123.)
+
+**Cause.** (1) PolyU's booking backend fails under the 08:30 load. Our own
+traffic is not the trigger as far as the log shows: on 11-21 the student
+warmup GETs were already failing at 08:29:58, before any POST. (2) A 500 or a
+403 on a submit was final: `ERROR_TRANSIENT` was never re-submitted, and 403
+was `ERROR_FATAL`, which also stopped the remaining groups from launching —
+student never tried 19:30 or 21:30 on 11-21. (3) Why PolyU answers 403 is
+still not established. Working theory, unproven: the session is rebuilt on
+another node after the failure and its CSRFToken changes (11-17).
+
+**Rule:** a submit answered 403 is `ERROR_FORBIDDEN`; it no longer stops the
+ladder. A submit answered 403, 5xx or a transport error is re-clicked and
+re-submitted per candidate (403: after `refresh_csrf_token()`, shared by
+concurrent 403s, at most `SUBMIT_403_REFRESH_MAX`), up to `SUBMIT_RETRY_MAX`
+(2) times within `SUBMIT_RETRY_WINDOW_SECONDS` (30s from the first submit),
+attempts ≥ `SUBMIT_RETRY_GAP_SECONDS` apart, and not once any submit of the
+account is SUCCESS or ERROR_FATAL. The first submit of each candidate is
+unchanged, in every group: the stagger waits for a group's first answers
+only, so a group that is retrying does not hold back the next one (a review
+of the first draft caught exactly that — 19:30 left 2s late). With retries
+the run can take up to ~90s after the trigger to reach the records check,
+against ~45s before. A retry can run while sibling submits are still queued at PolyU;
+that is believed harmless because a submit carries its own court and hour
+(every error page names the slot that was posted, whatever was clicked last)
+and a GET of make_book.do does not rotate the token (the warmup GETs never
+invalidated the bootstrap token). **Unverified in production:** whether a retry at 08:30:11–18 can
+still find a free court (on 11-17 everything was OCCUPIED by 08:30:18), and
+whether a re-submit after a token refresh is accepted. The next occurrence
+logs `submit … answered …; retry N/2`, `submit answered 403; CSRFToken
+refresh …` and the retry's cell and submit results — read those before
+tuning the window.
+
 ## 2026-11-14 — student: every cell_click timed out, then 403; no submit sent
 
 Run 43527592500, target Sat 2026-11-21, staff + student. Staff
