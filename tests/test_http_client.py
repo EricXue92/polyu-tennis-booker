@@ -70,15 +70,16 @@ def test_available_slot_is_immutable():
         slot.facility_id = 99  # frozen dataclass
 
 
-def test_booking_result_has_four_outcomes():
+def test_booking_result_has_five_outcomes():
     from src.http_client import BookingResult
     assert {
         BookingResult.SUCCESS,
         BookingResult.OCCUPIED,
         BookingResult.ERROR_TRANSIENT,
         BookingResult.ERROR_FATAL,
+        BookingResult.ERROR_FORBIDDEN,  # submit 403, retried [2026-11-21]
     }
-    assert len(list(BookingResult)) == 4
+    assert len(list(BookingResult)) == 5
 
 
 import pytest
@@ -611,13 +612,31 @@ async def test_submit_returns_fatal_on_4xx():
 
     respx.post(
         "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do"
-    ).mock(return_value=Response(403, text="Forbidden"))
+    ).mock(return_value=Response(404, text="Not Found"))
     client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
     try:
         result = await client.submit(_slot_11_at_1230())
     finally:
         await client.aclose()
     assert result is BookingResult.ERROR_FATAL
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_submit_403_is_forbidden_not_fatal():
+    """PolyU's 403 "There is a problem" page refuses the POST, not the slot:
+    the orchestrator retries it after a CSRFToken refresh [2026-11-21]."""
+    from src.http_client import PolyUHttpClient, BookingResult
+
+    respx.post(
+        "https://www40.polyu.edu.hk/starspossfbns/secure/ui_make_book/make_book_submit.do"
+    ).mock(return_value=Response(403, text="There is a problem."))
+    client = PolyUHttpClient(cookies={"JSESSIONID": "x"}, csrf_token="t", fb_user_id="1")
+    try:
+        result = await client.submit(_slot_11_at_1230())
+    finally:
+        await client.aclose()
+    assert result is BookingResult.ERROR_FORBIDDEN
 
 
 @pytest.mark.asyncio

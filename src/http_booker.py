@@ -48,6 +48,18 @@ the slot, so giving up on it is never right.
 CELL_403_REFRESH_MAX times: on 2026-11-14 the student site answered every
 re-click with its 403 "There is a problem" page while the session was still
 alive, and the run quit at 08:30:13 without a single submit.
+
+Submit retry. A submit answered 403 (ERROR_FORBIDDEN), 5xx or a transport
+error says nothing about the slot either. That candidate is re-clicked and
+re-submitted - after a CSRFToken refresh for a 403 - up to SUBMIT_RETRY_MAX
+times while SUBMIT_RETRY_WINDOW_SECONDS is open and no submit of the account
+has come back SUCCESS or ERROR_FATAL. A 403 no longer stops later groups from
+launching. On 2026-11-21 PolyU's backend fell over at 08:30: staff's submits
+answered 500 "We'll be back soon!" and 403 after 10-15s and were dropped, and
+student's first group answered 403 in 0.37s, which (403 being ERROR_FATAL
+then) kept its other two hours from ever being submitted. The first submit of
+every candidate is sent exactly as before; the retry only runs after PolyU has
+answered it without a verdict.
 """
 from __future__ import annotations
 
@@ -88,6 +100,27 @@ CELL_RETRY_MIN_ROUND_SECONDS = 1.0
 # a CSRFToken refresh. Capped because a 403 answers in ~150ms: a session that
 # is really dead must not be hammered for the whole window.
 CELL_403_REFRESH_MAX = 3
+
+# Submit retry. A submit answered 403, 5xx or a transport error carries no
+# verdict on the slot, so the candidate is re-clicked and re-submitted (after
+# a CSRFToken refresh for a 403). Never touches the first submit of any
+# candidate - those still leave at the trigger, untouched.
+# WINDOW: measured from the first submit; no retry starts after it. Sized so a
+#   submit that queued 10-15s before failing (2026-11-21) still gets one more
+#   go, while a 45s ReadTimeout is left alone - by then the slot is long gone
+#   and the booking may have gone through anyway [2026-10-16].
+# MAX: retries per candidate.
+# GAP: minimum spacing between one candidate's attempts; a 403 answers in
+#   ~150ms and a dead session must not be hammered.
+# 403_REFRESH_MAX: token refreshes per account during the submit phase.
+SUBMIT_RETRY_WINDOW_SECONDS = 30.0
+SUBMIT_RETRY_MAX = 2
+SUBMIT_RETRY_GAP_SECONDS = 1.0
+SUBMIT_403_REFRESH_MAX = 2
+_SUBMIT_RETRYABLE = (BookingResult.ERROR_FORBIDDEN, BookingResult.ERROR_TRANSIENT)
+# Answers that end retrying for the whole account: booked, or the non-403
+# error page that has meant "booked" before - the records decide that one.
+_SUBMIT_FINAL = (BookingResult.SUCCESS, BookingResult.ERROR_FATAL)
 
 
 # Awaited once between the cell-click round and the first submit; the
@@ -186,6 +219,8 @@ async def book_via_http(
     stagger_s: float = SUBMIT_STAGGER_SECONDS,
     cell_retry_window_s: float = CELL_RETRY_WINDOW_SECONDS,
     cell_retry_min_round_s: float = CELL_RETRY_MIN_ROUND_SECONDS,
+    submit_retry_window_s: float = SUBMIT_RETRY_WINDOW_SECONDS,
+    submit_retry_gap_s: float = SUBMIT_RETRY_GAP_SECONDS,
     wait_for_trigger: TriggerWait | None = None,
 ) -> int:
     """Run the booking flow. Returns 0 on SUCCESS, 1 otherwise."""
@@ -193,6 +228,8 @@ async def book_via_http(
         client, target_date, slots, dry_run, log=log, stagger_s=stagger_s,
         cell_retry_window_s=cell_retry_window_s,
         cell_retry_min_round_s=cell_retry_min_round_s,
+        submit_retry_window_s=submit_retry_window_s,
+        submit_retry_gap_s=submit_retry_gap_s,
         wait_for_trigger=wait_for_trigger,
     )
     return outcome.rc
@@ -208,6 +245,8 @@ async def book_via_http_outcome(
     stagger_s: float = SUBMIT_STAGGER_SECONDS,
     cell_retry_window_s: float = CELL_RETRY_WINDOW_SECONDS,
     cell_retry_min_round_s: float = CELL_RETRY_MIN_ROUND_SECONDS,
+    submit_retry_window_s: float = SUBMIT_RETRY_WINDOW_SECONDS,
+    submit_retry_gap_s: float = SUBMIT_RETRY_GAP_SECONDS,
     wait_for_trigger: TriggerWait | None = None,
 ) -> BookingOutcome:
     """Run the parallel cell-click + staggered time-grouped submit flow.
@@ -398,47 +437,158 @@ async def book_via_http_outcome(
     for rank, slot in accepted:
         groups.setdefault((slot.start_dt, slot.end_dt), []).append((rank, slot))
 
+    # Submit retry state, shared by every candidate of this account.
+    submit_deadline = loop.time() + submit_retry_window_s
+    seen: set[BookingResult] = set()  # every submit answer so far
+    token_gen = 0  # bumped by each successful submit-phase CSRFToken refresh
+    submit_refreshes = 0
+    refresh_lock = asyncio.Lock()
+
+    def _retry_over() -> bool:
+        return loop.time() >= submit_deadline or any(r in seen for r in _SUBMIT_FINAL)
+
+    async def _refresh_token_once(gen_used: int) -> None:
+        """Refresh the CSRFToken unless a sibling already has since the
+        refused request was built, or the budget is spent."""
+        nonlocal token_gen, submit_refreshes
+        async with refresh_lock:
+            if token_gen != gen_used or submit_refreshes >= SUBMIT_403_REFRESH_MAX:
+                return
+            submit_refreshes += 1
+            changed = await client.refresh_csrf_token(
+                timeout=CELL_RETRY_TIMEOUT_SECONDS,
+            )
+            if changed is not None:
+                # A refresh that read no token is not a refresh: a sibling
+                # holding the same generation may still try (budget allowing).
+                token_gen += 1
+            log.warning(
+                "submit answered 403; CSRFToken refresh %d/%d: %s",
+                submit_refreshes, SUBMIT_403_REFRESH_MAX,
+                {True: "token changed", False: "token unchanged",
+                 None: "failed"}[changed],
+            )
+
+    async def _submit(
+        rank: int,
+        slot: AvailableSlot,
+        gen: int,
+        first_answer: Callable[[BookingResult], None],
+    ) -> BookingResult:
+        """Submit one candidate; on 403 / 5xx / transport error re-click and
+        re-submit it while the retry window is open (see SUBMIT_RETRY_*).
+
+        `gen` is the token generation the first request is built with, and
+        `first_answer` is told the first submit's result the moment it lands.
+        The first submit goes out exactly as before; everything below it runs
+        only after PolyU has answered without a verdict.
+        """
+        started = loop.time()
+        result = await client.submit(slot)
+        seen.add(result)
+        first_answer(result)
+        for retry in range(1, SUBMIT_RETRY_MAX + 1):
+            if result not in _SUBMIT_RETRYABLE or _retry_over():
+                break
+            log.warning(
+                "submit rank=%d %s answered %s; retry %d/%d (re-click, re-submit)",
+                rank, slot.facility_name, result.name, retry, SUBMIT_RETRY_MAX,
+            )
+            if result is BookingResult.ERROR_FORBIDDEN:
+                await _refresh_token_once(gen)
+            # Let siblings report first, then keep this candidate's attempts
+            # at least submit_retry_gap_s apart.
+            await asyncio.sleep(0)
+            if _retry_over():
+                break
+            pause = submit_retry_gap_s - (loop.time() - started)
+            if pause > 0:
+                await asyncio.sleep(pause)
+                if _retry_over():
+                    break
+            gen = token_gen  # the re-click is built with this token
+            started = loop.time()
+            click = await client.cell_click(slot, timeout=CELL_RETRY_TIMEOUT_SECONDS)
+            log.info(
+                "submit retry rank=%d %s: cell=%s (latency=%dms)",
+                rank, slot.facility_name, click.outcome.name, click.latency_ms,
+            )
+            if click.outcome is CellOutcome.OCCUPIED:
+                result = BookingResult.OCCUPIED
+                break
+            if _is_403(click):
+                result = BookingResult.ERROR_FORBIDDEN
+                continue
+            if click.outcome is CellOutcome.ERROR_TRANSIENT:
+                result = BookingResult.ERROR_TRANSIENT
+                continue
+            if click.outcome is not CellOutcome.ACCEPTED or _retry_over():
+                break
+            # The click may have taken seconds and a sibling may have
+            # refreshed meanwhile: the re-submit is built with the token of now.
+            gen = token_gen
+            result = await client.submit(slot)
+            seen.add(result)
+        return result
+
     async def _run_group(
         group: list[tuple[int, AvailableSlot]],
+        first_round: "asyncio.Future[list[BookingResult]]",
     ) -> list[tuple[tuple[int, AvailableSlot], BookingResult]]:
-        results = await asyncio.gather(
-            *(client.submit(slot) for _, slot in group)
-        )
+        """Submit a group concurrently. `first_round` resolves as soon as every
+        candidate's *first* submit has answered - the launch loop waits on
+        that, never on the retries that may follow."""
+        gen = token_gen
+        firsts: list[BookingResult] = []
+
+        def _first_answer(result: BookingResult) -> None:
+            firsts.append(result)
+            if len(firsts) == len(group) and not first_round.done():
+                first_round.set_result(firsts)
+
+        try:
+            results = await asyncio.gather(
+                *(_submit(rank, slot, gen, _first_answer) for rank, slot in group)
+            )
+        finally:
+            if not first_round.done():
+                # Crashed or cancelled: never leave the launch loop waiting.
+                first_round.set_result(firsts)
         for (rank, slot), result in zip(group, results):
             log.info("submit rank=%d %s: %s", rank, slot.facility_name, result.name)
         return list(zip(group, results))
 
-    def _settled() -> list[tuple[tuple[int, AvailableSlot], BookingResult]]:
-        """Results from groups that have already finished. Re-raises task
-        exceptions so a real bug still crashes the run with a traceback."""
-        out: list[tuple[tuple[int, AvailableSlot], BookingResult]] = []
-        for task in launched:
-            if task.done():
-                out.extend(task.result())
-        return out
-
     launched: list[asyncio.Task] = []
+    first_rounds: "list[asyncio.Future[list[BookingResult]]]" = []
     for (start_dt, _end_dt), group in groups.items():
         if launched:
             # Give the higher-priority groups a head start, but cap it: a hung
             # submit must not spend its whole timeout budget before the
             # fallback group is even dispatched. Returns early once every
-            # launched group has settled, so a prompt answer costs no delay.
-            await asyncio.wait(launched, timeout=stagger_s)
-            settled = _settled()
-            if any(r is BookingResult.SUCCESS for _, r in settled):
+            # launched group's first submits have answered, so a prompt answer
+            # costs no delay - and neither does a group that is now retrying.
+            await asyncio.wait(first_rounds, timeout=stagger_s)
+            for task in launched:
+                if task.done():
+                    task.result()  # a real bug still crashes the run, with a traceback
+            answered = {r for fr in first_rounds if fr.done() for r in fr.result()}
+            if BookingResult.SUCCESS in seen:
                 break  # Already booked — don't burn the daily quota on a fallback.
-            if any(r is BookingResult.ERROR_FATAL for _, r in settled):
+            if BookingResult.ERROR_FATAL in answered:
                 # Either auth is dead or (since 2026-10) the booking went
                 # through behind a "Failed to reserve facility" page; in
-                # both cases a further group is wasted at best.
+                # both cases a further group is wasted at best. A 403
+                # (ERROR_FORBIDDEN) is neither, and does not stop the ladder:
+                # on 2026-11-21 it kept student off 19:30 and 21:30.
                 log.error(
                     "submit ERROR_FATAL with no SUCCESS before timeslot %s; "
                     "not launching further groups (checking records instead)",
                     start_dt.strftime("%H:%M"),
                 )
                 break
-        launched.append(asyncio.create_task(_run_group(group)))
+        first_round = loop.create_future()
+        first_rounds.append(first_round)
+        launched.append(asyncio.create_task(_run_group(group, first_round)))
 
     outcomes = [pair for chunk in await asyncio.gather(*launched) for pair in chunk]
     return await _settle(outcomes, client, target_date, log)
