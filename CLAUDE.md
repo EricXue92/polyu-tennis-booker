@@ -12,10 +12,7 @@ triggered daily by a Cloudflare Worker (entrypoint `book-tennis`, defined in
 ## Commands
 
 ```bash
-uv sync                                   # install deps (Python 3.12+, Playwright)
 uv run playwright install chromium        # one-time browser install
-uv run pytest                             # run all unit tests (offline, no network/browser)
-uv run pytest tests/test_http_booker.py::test_happy_path_rank0_wins
 uv run book-tennis --dry-run --skip-sleep # local end-to-end (needs POLYU_USERNAME/POLYU_PASSWORD)
 uv run book-tennis --dry-run --skip-sleep --target-date 2026-09-19  # exercise a weekend (dual-account) rule
 ```
@@ -51,7 +48,7 @@ only if every account booked) together with a `wait_for_trigger` coroutine
 that sleeps to 08:30:00.000 — the flow pre-clicks, awaits it, then submits.
 
 That orchestrator **skips search** and runs two phases over the
-`(SLOT_PRIORITY × TENNIS_FACILITIES)` candidate set. Phase 1 fires every
+`(slot rule × TENNIS_FACILITIES)` candidate set. Phase 1 fires every
 candidate's `cell_click()` concurrently (re-firing timed-out candidates if
 none was ACCEPTED). Phase 2 groups ACCEPTED cells by `(start, end)` time-slot
 preserving rank order, fires each group's `submit()` concurrently, and
@@ -71,7 +68,7 @@ changes (dual accounts, notify, cell-click retry) have no spec.
 `starspossfbstud` — same host, different J2EE context root, identical endpoint
 suffixes) and `Account` (site + credential env-var names + a
 `slot_priority(target_date)` rule). `ACCOUNTS = (STAFF_ACCOUNT,
-STUDENT_ACCOUNT, STUDENT2_ACCOUNT)`. An account whose rule returns `()` sits
+STUDENT_ACCOUNT)`. An account whose rule returns `()` sits
 the run out. Each `PolyUHttpClient` is bound to one `Site` and derives its
 URLs and Referer headers from it — never hardcode a context root in the
 client.
@@ -87,12 +84,10 @@ client.
   19:30 → 21:30), both on both courts. Both fire at 08:30 blind to each
   other, so this static split is the only thing preventing overlap — never
   give either account a weekend fallback on the other's hours.
-- **Student2** (`POLYU_STUDENT2_USERNAME`/`POLYU_STUDENT2_PASSWORD`, student
-  site): Wednesday and Friday targets only (`_STUDENT2_WEEKDAYS`), rule
-  `student2_slot_priority_for`, trying `SLOT_PRIORITY` (any one hour of
-  18:30–21:30). `student` fires alongside it those days on its own ladder; the
-  two may each take a court at the same hour or end up on different (possibly
-  non-adjacent) hours — there is no weekday split.
+- **Student2 is gone.** The second student account (Wed/Fri targets) was
+  removed on 2026-11-21 at the owner's request; only staff and student book.
+  Its `POLYU_STUDENT2_*` secrets may still exist in the repo but nothing
+  reads them — don't re-add the account without being asked.
 - **Student result email.** Accounts with `notify_result=True` (only
   `student`) get their outcome emailed after every run they take part in —
   now every day. `src/notify.py` uses Gmail SMTP
@@ -277,16 +272,15 @@ Check latencies before suspecting the code:
   off-peak slot — see the script's header comment. CI uploads any
   `artifacts/` content if present; the booker itself creates no files.
 - **Dry-run does not prove PolyU still accepts our cell-click POST shape.**
-  To live-test that: drop `dry_run`, set `SLOT_PRIORITY` to a known-free
-  off-peak window, and run before 08:30 HKT.
+  To live-test that: drop `dry_run`, point an account's slot rule at a
+  known-free off-peak window, and run before 08:30 HKT.
 
 ## Tuning knobs
 
 - Slot preferences: per-account rules in `src/config.py` (tuples of
-  `(start, end)`, tried in order). `SLOT_PRIORITY` (18:30 → 19:30 → 20:30) is
-  the weekday ladder student2 uses (`student` has its own,
-  `_STUDENT_WEEKDAY_SLOTS`); the third rung is cheap insurance on
-  contested evenings `[2026-09-16]`.
+  `(start, end)`, tried in order): `_STUDENT_WEEKDAY_SLOTS`,
+  `_STUDENT_WEEKEND_SLOTS`, `_STAFF_WEEKEND_SLOTS`. Extra rungs are cheap
+  insurance on contested evenings `[2026-09-16]`.
 - Trigger time: `TRIGGER_TIME_HKT` in `src/config.py`.
 - Days-ahead window: `DAYS_AHEAD` in `src/dates.py`.
 - Submit stagger / cell-click retry: `SUBMIT_STAGGER_SECONDS`, `CELL_RETRY_*`
@@ -297,11 +291,5 @@ Check latencies before suspecting the code:
 Each account's rule in `src/config.py` decides which target weekdays it books.
 When every account's rule returns `()`, `run()` short-circuits with exit 0
 (no sleep, no Playwright launch) — the watchdog treats the day as accounted
-for and does not open an issue; no day currently hits that path. Currently
-(since 2026-11-04):
-
-- **Mon / Tue / Thu:** student only, 18:30 → 17:30 → 19:30 → 20:30 → 21:30.
-- **Wed / Fri:** student on that same ladder; student2 18:30 → 19:30 → 20:30.
-- **Sat / Sun:** staff takes `_STAFF_WEEKEND_SLOTS` (18:30, 20:30), student
-  takes `_STUDENT_WEEKEND_SLOTS` (17:30, 19:30, 21:30) — see "Accounts and
-  sites" for why the parity split matters.
+for and does not open an issue; no day currently hits that path. The
+per-weekday schedule is in "Accounts and sites" above.

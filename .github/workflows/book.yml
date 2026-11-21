@@ -35,14 +35,9 @@ jobs:
       TZ: Asia/Hong_Kong
       POLYU_USERNAME: ${{ secrets.POLYU_USERNAME }}
       POLYU_PASSWORD: ${{ secrets.POLYU_PASSWORD }}
-      # Student account (starspossfbstud). Only used on weekend targets
-      # (src/config.py); the booker never reads these on other days.
+      # Student account (starspossfbstud), active every day (src/config.py).
       POLYU_STUDENT_USERNAME: ${{ secrets.POLYU_STUDENT_USERNAME }}
       POLYU_STUDENT_PASSWORD: ${{ secrets.POLYU_STUDENT_PASSWORD }}
-      # Second student account (starspossfbstud). Only used on Wednesday
-      # and Friday targets (src/config.py).
-      POLYU_STUDENT2_USERNAME: ${{ secrets.POLYU_STUDENT2_USERNAME }}
-      POLYU_STUDENT2_PASSWORD: ${{ secrets.POLYU_STUDENT2_PASSWORD }}
       # Result email for the `student` account (src/notify.py): Gmail address
       # + app password. NOTIFY_EMAIL_TO is optional; unset sends to
       # SMTP_USERNAME itself. Missing secrets just skip the email.
