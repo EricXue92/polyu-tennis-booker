@@ -39,25 +39,11 @@ def test_active_jobs_both_accounts_on_weekend():
     ]
 
 
-def test_active_jobs_student_and_student2_on_wednesday_and_friday():
+def test_active_jobs_student_only_on_every_weekday():
     from src.booker import active_jobs
 
-    for d in (date(2026, 10, 14), date(2026, 10, 16)):  # Wednesday, Friday
-        jobs = active_jobs(d, ACCOUNTS)
-        assert [a.name for a, _ in jobs] == ["student", "student2"]
-        assert jobs[0][1] == _STUDENT_WEEKDAY_LADDER
-        assert jobs[1][1] == [
-            (time(18, 30), time(19, 30)),
-            (time(19, 30), time(20, 30)),
-            (time(20, 30), time(21, 30)),
-        ]
-
-
-def test_active_jobs_student_only_on_monday_tuesday_thursday():
-    from src.booker import active_jobs
-
-    for d in (date(2026, 10, 12), date(2026, 10, 13), date(2026, 10, 15)):
-        jobs = active_jobs(d, ACCOUNTS)
+    for day in range(12, 17):  # Mon 2026-10-12 .. Fri 2026-10-16
+        jobs = active_jobs(date(2026, 10, day), ACCOUNTS)
         assert [a.name for a, _ in jobs] == ["student"]
         assert jobs[0][1] == _STUDENT_WEEKDAY_LADDER
 
@@ -187,7 +173,7 @@ async def test_book_all_turns_a_crash_into_a_failed_result():
 
 def test_only_the_student_account_is_flagged_for_the_result_email():
     assert {a.name: a.notify_result for a in ACCOUNTS} == {
-        "staff": False, "student": True, "student2": False,
+        "staff": False, "student": True,
     }
 
 

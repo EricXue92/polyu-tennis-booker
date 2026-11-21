@@ -1,7 +1,7 @@
 """Tests for weekday-specific slot priority rules in src/config.py."""
 from datetime import date, time
 
-from src.config import SLOT_PRIORITY, slot_priority_for
+from src.config import slot_priority_for
 
 
 def test_staff_sits_out_weekdays():
@@ -86,39 +86,14 @@ def test_weekend_staff_and_student_slots_never_overlap():
         assert staff.isdisjoint(student)
 
 
-def test_student2_books_evening_ladder_on_wednesday_and_friday():
-    from src.config import student2_slot_priority_for
-
-    expected = (
-        (time(18, 30), time(19, 30)),
-        (time(19, 30), time(20, 30)),
-        (time(20, 30), time(21, 30)),
-    )
-    assert SLOT_PRIORITY == expected
-    assert student2_slot_priority_for(date(2026, 10, 14)) == expected  # Wednesday
-    assert student2_slot_priority_for(date(2026, 10, 16)) == expected  # Friday
-
-
-def test_student2_sits_out_other_days():
-    from src.config import student2_slot_priority_for
-
-    for d in (
-        date(2026, 10, 12), date(2026, 10, 13), date(2026, 10, 15),  # Mon, Tue, Thu
-        date(2026, 10, 17), date(2026, 10, 18),  # Sat, Sun
-    ):
-        assert student2_slot_priority_for(d) == ()
-
-
-def test_accounts_staff_first_then_students():
+def test_accounts_are_staff_then_student_and_nothing_else():
+    """The second student account was stopped on 2026-11-21 (owner's call)."""
     from src.config import (
         ACCOUNTS, STAFF_SITE, STUDENT_SITE, slot_priority_for,
-        student2_slot_priority_for, student_slot_priority_for,
+        student_slot_priority_for,
     )
 
-    staff, student, student2 = ACCOUNTS
-    assert (student2.name, student2.site, student2.username_env, student2.password_env) == (
-        "student2", STUDENT_SITE, "POLYU_STUDENT2_USERNAME", "POLYU_STUDENT2_PASSWORD")
-    assert student2.slot_priority is student2_slot_priority_for
+    staff, student = ACCOUNTS
     assert (staff.name, staff.site, staff.username_env, staff.password_env) == (
         "staff", STAFF_SITE, "POLYU_USERNAME", "POLYU_PASSWORD")
     assert staff.slot_priority is slot_priority_for

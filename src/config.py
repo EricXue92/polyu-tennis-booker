@@ -78,17 +78,6 @@ TENNIS_FACILITIES = {
     11: "Tennis Court No. 2",
 }
 
-# Weekday evening ladder: any one hour between 18:30 and 21:30, tried in
-# order. Used by student2 on its weekdays (the staff account stopped booking
-# weekdays on 2026-10-08; `student` has its own ladder, see below). 20:30 was added 2026-09-16 after weekday targets
-# lost both prime hours on both courts four Wednesdays running
-# (2026-08-26 .. 2026-09-16), so a third rung gives the run a live shot.
-SLOT_PRIORITY: tuple[tuple[time, time], ...] = (
-    (time(18, 30), time(19, 30)),
-    (time(19, 30), time(20, 30)),
-    (time(20, 30), time(21, 30)),
-)
-
 # --- Weekend dual booking: staff + student on complementary hours ---
 # On Saturdays and Sundays the owner wants two consecutive hours, one booked
 # by each account. The accounts fire concurrently at 08:30 and cannot see each
@@ -113,7 +102,7 @@ def slot_priority_for(target_date: date) -> tuple[tuple[time, time], ...]:
     """Staff slot rule: weekends only, even hours only; sits out weekdays.
 
     The owner stopped weekday staff bookings on 2026-10-08 — weekdays belong
-    to the student accounts now.
+    to the student account now.
     """
     if target_date.weekday() in _WEEKEND_WEEKDAYS:
         return _STAFF_WEEKEND_SLOTS
@@ -122,8 +111,8 @@ def slot_priority_for(target_date: date) -> tuple[tuple[time, time], ...]:
 
 # On weekdays the student account prefers 18:30-19:30 but takes any evening
 # hour from 17:30 to 22:30 (owner's choice, 2026-11-04; it was 18:30 only from
-# 2026-10-11). On Wed/Fri it fires alongside student2, whose ladder shares three
-# of these hours — the two can each take a court or end up on different hours.
+# 2026-10-11). It is the only weekday account: the second student account
+# (`student2`, Wed/Fri) was stopped on 2026-11-21 at the owner's request.
 _STUDENT_WEEKDAY_SLOTS: tuple[tuple[time, time], ...] = (
     (time(18, 30), time(19, 30)),
     (time(17, 30), time(18, 30)),
@@ -138,20 +127,6 @@ def student_slot_priority_for(target_date: date) -> tuple[tuple[time, time], ...
     if target_date.weekday() in _WEEKEND_WEEKDAYS:
         return _STUDENT_WEEKEND_SLOTS
     return _STUDENT_WEEKDAY_SLOTS
-
-
-# --- Second student account: Wednesdays and Fridays ---
-# A different student login (starspossfbstud) that books any one hour of the
-# 18:30-21:30 evening on Wednesday and Friday targets; every other day it
-# sits out. `student` is also active those days, on its own weekday ladder.
-_STUDENT2_WEEKDAYS: frozenset[int] = frozenset({2, 4})  # Wed=2, Fri=4
-
-
-def student2_slot_priority_for(target_date: date) -> tuple[tuple[time, time], ...]:
-    """Second-student slot rule: Wed/Fri only, SLOT_PRIORITY; sits out otherwise."""
-    if target_date.weekday() in _STUDENT2_WEEKDAYS:
-        return SLOT_PRIORITY
-    return ()
 
 
 @dataclass(frozen=True)
@@ -185,15 +160,8 @@ STUDENT_ACCOUNT = Account(
     slot_priority=student_slot_priority_for,
     notify_result=True,
 )
-STUDENT2_ACCOUNT = Account(
-    name="student2",
-    site=STUDENT_SITE,
-    username_env="POLYU_STUDENT2_USERNAME",
-    password_env="POLYU_STUDENT2_PASSWORD",
-    slot_priority=student2_slot_priority_for,
-)
 # Order matters only for logging; the accounts book concurrently.
-ACCOUNTS: tuple[Account, ...] = (STAFF_ACCOUNT, STUDENT_ACCOUNT, STUDENT2_ACCOUNT)
+ACCOUNTS: tuple[Account, ...] = (STAFF_ACCOUNT, STUDENT_ACCOUNT)
 
 TRIGGER_TIME_HKT = time(8, 30, 0)
 
