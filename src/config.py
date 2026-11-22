@@ -165,6 +165,14 @@ ACCOUNTS: tuple[Account, ...] = (STAFF_ACCOUNT, STUDENT_ACCOUNT)
 
 TRIGGER_TIME_HKT = time(8, 30, 0)
 
+# Master switch. While True, the daily run books nothing for any account and
+# exits 0 (so the watchdog sees a successful run and stays quiet); a dry run
+# still works. The slot rules above are untouched — resume by setting False.
+#
+# Paused 2026-11-22 at the owner's request: the courts are closed for the
+# exam period. Resume only when the owner says the exams are over.
+BOOKING_PAUSED = True
+
 
 class _Pending:
     """Sentinel marking a selector that has not yet been filled in."""

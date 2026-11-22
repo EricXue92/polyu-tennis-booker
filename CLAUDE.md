@@ -9,6 +9,13 @@ morning at 08:30 HKT. Runs as a GitHub Actions `workflow_dispatch` job
 triggered daily by a Cloudflare Worker (entrypoint `book-tennis`, defined in
 `pyproject.toml`).
 
+**Booking is PAUSED since 2026-11-22** (`BOOKING_PAUSED = True` in
+`src/config.py`): the courts are closed for the exam period, so the daily run
+logs `booking is paused` and exits 0 without logging in, booking or emailing.
+The Worker still triggers it and the watchdog stays quiet. Resume — only when
+the owner says the exams are over — by setting it to `False` on main; a dry
+run is not paused, so verify login with one first.
+
 ## Commands
 
 ```bash
@@ -312,3 +319,9 @@ When every account's rule returns `()`, `run()` short-circuits with exit 0
 (no sleep, no Playwright launch) — the watchdog treats the day as accounted
 for and does not open an issue; no day currently hits that path. The
 per-weekday schedule is in "Accounts and sites" above.
+
+`BOOKING_PAUSED` (`src/config.py`) is the master switch above all of that:
+while `True`, `run()` returns 0 before looking at any rule (dry runs
+excepted). Use it for closures (exams, maintenance) instead of emptying the
+slot rules or disabling the workflow — a disabled workflow makes the watchdog
+open an issue every morning.
