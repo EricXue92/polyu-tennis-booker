@@ -276,3 +276,43 @@ async def test_book_all_passes_the_trigger_to_every_account():
     )
     assert overall_rc(results) == 0
     assert fired == 2
+
+
+# --- BOOKING_PAUSED: the owner's master switch (exam period, court closures) ---
+
+@pytest.fixture
+def _no_credentials(monkeypatch):
+    """With no credentials in the environment, a run that gets past the pause
+    check dies on the first os.environ lookup — long before Playwright."""
+    for account in ACCOUNTS:
+        monkeypatch.delenv(account.username_env, raising=False)
+        monkeypatch.delenv(account.password_env, raising=False)
+
+
+async def test_run_books_nothing_and_exits_zero_while_paused(monkeypatch, _no_credentials):
+    import src.booker as booker
+
+    monkeypatch.setattr(booker, "BOOKING_PAUSED", True)
+
+    # Exit 0: the watchdog must see a successful run, not open an issue.
+    assert await booker.run(skip_sleep=True, target_date_override="2026-11-30") == 0
+
+
+async def test_run_proceeds_when_not_paused(monkeypatch, _no_credentials):
+    import src.booker as booker
+
+    monkeypatch.setattr(booker, "BOOKING_PAUSED", False)
+
+    with pytest.raises(KeyError):
+        await booker.run(skip_sleep=True, target_date_override="2026-11-30")
+
+
+async def test_dry_run_is_not_paused(monkeypatch, _no_credentials):
+    """A dry run never books, so it stays available during a pause — it is how
+    login is verified before booking is switched back on."""
+    import src.booker as booker
+
+    monkeypatch.setattr(booker, "BOOKING_PAUSED", True)
+
+    with pytest.raises(KeyError):
+        await booker.run(dry_run=True, skip_sleep=True, target_date_override="2026-11-30")

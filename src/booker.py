@@ -15,6 +15,7 @@ from playwright.async_api import (
 
 from src.config import (
     ACCOUNTS,
+    BOOKING_PAUSED,
     STAFF_SITE,
     SELECTORS,
     TRIGGER_TIME_HKT,
@@ -286,6 +287,12 @@ async def run(
 
     target_date = resolve_target_date(target_date_override)
     log.info("target booking date: %s", target_date)
+
+    if BOOKING_PAUSED and not dry_run:
+        # Owner's master switch (config.BOOKING_PAUSED). Exit 0 so the
+        # watchdog treats the day as accounted for and doesn't open an issue.
+        log.info("booking is paused (config.BOOKING_PAUSED); skipping run")
+        return 0
 
     jobs = active_jobs(target_date)
     if not jobs:
